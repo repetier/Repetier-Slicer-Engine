@@ -13,6 +13,8 @@
 #include <wx/statbmp.h>
 #include <wx/checkbox.h>
 #include <wx/statline.h>
+#include <wx/dataview.h>
+#include <wx/notebook.h>
 
 #include "libslic3r/Utils.hpp"
 #include "PresetBundle.hpp"
@@ -826,9 +828,41 @@ ConfigWizard::ConfigWizard(wxWindow *parent, RunReason reason) :
 	p->hscroll_sizer = new wxBoxSizer(wxHORIZONTAL);
 	p->hscroll->SetSizer(p->hscroll_sizer);
 
+	/// XXX
+	auto *pk = new wxDataViewTreeCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxDV_ROW_LINES);
+	// const wxDataViewItem root = pk->AppendContainer( wxDataViewItem(0), "The Root", 0 );
+ //    pk->AppendItem( root, "Child 1", 0 );
+ //    pk->AppendItem( root, "Child 2", 0 );
+ //    pk->AppendItem( root, "Child 3, very long, long, long, long", 0 );
+	// auto *tr = new wxDataViewTextRenderer("string", wxDATAVIEW_CELL_INERT);
+ //    auto *column0 = new wxDataViewColumn("title", tr, 0, 200, wxALIGN_LEFT, wxDATAVIEW_COL_SORTABLE | wxDATAVIEW_COL_RESIZABLE);
+ //    auto *tr1 = new wxDataViewTextRenderer("string", wxDATAVIEW_CELL_INERT);
+ //    auto *column1 = new wxDataViewColumn("another", tr1, 0, 200, wxALIGN_LEFT, wxDATAVIEW_COL_SORTABLE | wxDATAVIEW_COL_RESIZABLE);
+ //    pk->AppendColumn(column0);
+ //    pk->AppendColumn(column1);
+    const auto welcome = pk->AppendContainer(wxDataViewItem(0), "Welcome");
+    const auto fff = pk->AppendContainer(wxDataViewItem(0), from_u8("Průša MK3"));
+    // pk->AppendItem(fff, from_u8("Průša MK3"), 0);
+    // pk->InsertItem(fff, wxDataViewItem(), "Průša MK3");
+    // pk->AppendItem(fff, "Průša MK3 MMU");
+    const auto sla = pk->AppendContainer(wxDataViewItem(0), from_u8("Průša SL1"));
+    // pk->AppendItem(sla, from_u8("Průša SL1"));
+    const auto legacy = pk->AppendContainer(wxDataViewItem(0), "Legacy Printers");
+    pk->AppendItem(legacy, from_u8("Průša MK2.5"));
+    pk->AppendItem(legacy, from_u8("Průša MK2S"));
+    pk->Expand(legacy);
+    // const auto legacy_mk25 = pk->InsertItem(legacy, wxDataViewItem(0), from_u8("Průša MK2.5"), 0);
+    // pk->InsertItem(legacy, legacy_mk25, from_u8("Průša MK2S"), 0);
+    const auto custom = pk->AppendContainer(wxDataViewItem(0), "Custom Printer");
+    pk->AppendContainer(wxDataViewItem(0), "Auto-updating");
+
+    // p->index->Hide();
+	/// XXX
+
+	topsizer->Add(pk, 1, wxEXPAND);
 	topsizer->Add(p->index, 0, wxEXPAND);
 	topsizer->AddSpacer(INDEX_MARGIN);
-	topsizer->Add(p->hscroll, 1, wxEXPAND);
+	topsizer->Add(p->hscroll, 5, wxEXPAND);
 
 	p->btn_prev = new wxButton(this, wxID_ANY, _(L("< &Back")));
 	p->btn_next = new wxButton(this, wxID_ANY, _(L("&Next >")));
@@ -855,6 +889,23 @@ ConfigWizard::ConfigWizard(wxWindow *parent, RunReason reason) :
 		->chain(p->page_diams)
 		->chain(p->page_temps);
 
+	/// XXX
+	auto *tabs = new wxNotebook(this, wxID_ANY);
+	auto *p1 = new wxPanel(tabs);
+	auto *p2 = new wxPanel(tabs);
+	auto *p3 = new wxPanel(tabs);
+	auto *p4 = new wxPanel(tabs);
+	auto *p5 = new wxPanel(tabs);
+	auto *p6 = new wxPanel(tabs);
+	tabs->AddPage(p1, from_u8("Welcome"));
+	tabs->AddPage(p2, from_u8("Průša MK3"));
+	tabs->AddPage(p3, from_u8("Průša SL1"));
+	tabs->AddPage(p4, from_u8("Legacy Printers"));
+	tabs->AddPage(p5, from_u8("Custom Printers"));
+	tabs->AddPage(p6, from_u8("Auto-updating"));
+	/// XXX
+
+	vsizer->Add(tabs, 0, wxEXPAND | wxALL, DIALOG_MARGIN);
 	vsizer->Add(topsizer, 1, wxEXPAND | wxALL, DIALOG_MARGIN);
 	vsizer->Add(hline, 0, wxEXPAND);
 	vsizer->Add(p->btnsizer, 0, wxEXPAND | wxALL, DIALOG_MARGIN);
