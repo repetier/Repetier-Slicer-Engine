@@ -34,8 +34,8 @@
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Utils.hpp"
 
-#include "slic3r/GUI/GUI.hpp"
-#include "slic3r/GUI/GUI_App.hpp"
+// #include "slic3r/GUI/GUI.hpp"
+// #include "slic3r/GUI/GUI_App.hpp"
 
 using namespace Slic3r;
 
@@ -98,7 +98,7 @@ int main(int argc, char **argv)
     CLIConfig cli_config;
 #ifdef __APPLE__
 	// Enable the GUI mode by default, to support drag & drop.
-	cli_config.gui.value = true;
+	cli_config.gui.value = false;
 #endif /* __APPLE__ */
 
     cli_config.apply(all_config, true);
@@ -126,39 +126,12 @@ int main(int argc, char **argv)
         print_config.apply(c);
     }
 
-    if ((input_files.empty() || cli_config.gui.value) && ! cli_config.no_gui.value && ! cli_config.help.value && cli_config.save.value.empty()) {
-#if 1
-        GUI::GUI_App *gui = new GUI::GUI_App();
-        GUI::GUI_App::SetInstance(gui);
-        gui->CallAfter([gui, &input_files, &cli_config, &extra_config, &print_config] {
-#if 0
-            // Load the cummulative config over the currently active profiles.
-            //FIXME if multiple configs are loaded, only the last one will have an effect.
-            // We need to decide what to do about loading of separate presets (just print preset, just filament preset etc).
-            // As of now only the full configs are supported here.
-            if (! print_config.empty())
-                gui->mainframe->load_config(print_config);
-#endif
-            if (! cli_config.load.values.empty())
-                // Load the last config to give it a name at the UI. The name of the preset may be later
-                // changed by loading an AMF or 3MF.
-                //FIXME this is not strictly correct, as one may pass a print/filament/printer profile here instead of a full config.
-				gui->mainframe->load_config_file(cli_config.load.values.back());
-            // If loading a 3MF file, the config is loaded from the last one.
-            gui->plater()->load_files(input_files, true, true);
-            if (! extra_config.empty())
-                gui->mainframe->load_config(extra_config);
-        });
-        return wxEntry(argc, argv);
-#else
-        std::cout << "GUI support has not been built." << "\n";
-		return -1;
-#endif
-    }
-
     // apply command line options to a more specific DynamicPrintConfig which provides normalize()
     // (command line options override --load files)
     print_config.apply(extra_config, true);
+    
+    // Add slicing here
+    
     
     // write config if requested
     if (! cli_config.save.value.empty()) {
@@ -265,6 +238,7 @@ int main(int argc, char **argv)
             std::string err = print->validate();
             if (err.empty()) {
                 if (printer_technology == ptFFF) {
+                    fff_print.process();
                     fff_print.export_gcode(outfile, nullptr);
                 } else {
                     assert(printer_technology == ptSLA);

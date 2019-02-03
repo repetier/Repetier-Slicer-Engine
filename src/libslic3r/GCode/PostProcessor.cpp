@@ -134,13 +134,14 @@ static int run_script_win32(const std::string &script, const std::string &gcode)
 #else
     #include <sys/stat.h> //for getting filesystem UID/GID
     #include <unistd.h> //for getting current UID/GID
-    #include <boost/process.hpp>
+   // #include <boost/process.hpp>
 #endif
 
 namespace Slic3r {
 
 void run_post_process_scripts(const std::string &path, const PrintConfig &config)
 {
+#if 0 // disable postprocessor
     if (config.post_process.values.empty())
         return;
 
@@ -181,6 +182,7 @@ void run_post_process_scripts(const std::string &path, const PrintConfig &config
 #endif
         }
     }
+#endif
 }
 
 } // namespace Slic3r

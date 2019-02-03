@@ -297,8 +297,9 @@ std::string decode_path(const char *src)
 
 std::string normalize_utf8_nfc(const char *src)
 {
-    static std::locale locale_utf8(boost::locale::generator().generate(""));
-    return boost::locale::normalize(src, boost::locale::norm_nfc, locale_utf8);
+//    static std::locale locale_utf8(boost::locale::generator().generate(""));
+//    return boost::locale::normalize(src, boost::locale::norm_nfc, locale_utf8);
+    return std::string(src);
 }
 
 namespace PerlUtils {

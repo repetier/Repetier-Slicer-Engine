@@ -212,9 +212,14 @@ if(NOT TBB_FOUND)
   endif()
 
   # Find each component
+  message("  find               = ${TBB_FIND_COMPONENTS}")
+  message("  suffix               = ${TBB_STATIC_SUFFIX}")
+  message("  rootdir               = ${TBB_ROOT_DIR}")
+  message("  searchdir               = ${TBB_DEFAULT_SEARCH_DIR}")
   foreach(_comp ${TBB_SEARCH_COMPOMPONENTS})
+  message("  _comp               = ${_comp}")
     if(";${TBB_FIND_COMPONENTS};tbb;" MATCHES ";${_comp};")
-
+# message("file: " ${TBB_${_comp}_LIBRARY_RELEASE} ${${_comp}${TBB_STATIC_SUFFIX})
       # Search for the libraries
       find_library(TBB_${_comp}_LIBRARY_RELEASE ${_comp}${TBB_STATIC_SUFFIX}
           HINTS ${TBB_LIBRARY} ${TBB_SEARCH_DIR}
