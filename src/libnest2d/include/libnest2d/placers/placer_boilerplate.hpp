@@ -1,7 +1,7 @@
 #ifndef PLACER_BOILERPLATE_HPP
 #define PLACER_BOILERPLATE_HPP
 
-#include <libnest2d/libnest2d.hpp>
+#include <libnest2d/nester.hpp>
 
 namespace libnest2d { namespace placers {
 
@@ -18,7 +18,6 @@ public:
     using Segment = _Segment<Vertex>;
     using BinType = TBin;
     using Coord = TCoord<Vertex>;
-    using Unit = Coord;
     using Config = Cfg;
     using ItemGroup = _ItemGroup<RawShape>;
     using DefaultIter = typename ItemGroup::const_iterator;
@@ -63,7 +62,7 @@ public:
     bool pack(Item& item, const Range& rem = Range()) {
         auto&& r = static_cast<Subclass*>(this)->trypack(item, rem);
         if(r) {
-            items_.push_back(*(r.item_ptr_));
+            items_.emplace_back(*(r.item_ptr_));
             farea_valid_ = false;
         }
         return r;
@@ -78,7 +77,7 @@ public:
         if(r) {
             r.item_ptr_->translation(r.move_);
             r.item_ptr_->rotation(r.rot_);
-            items_.push_back(*(r.item_ptr_));
+            items_.emplace_back(*(r.item_ptr_));
             farea_valid_ = false;
         }
     }
@@ -131,7 +130,6 @@ using typename Base::Vertex;      \
 using typename Base::Segment;     \
 using typename Base::PackResult;  \
 using typename Base::Coord;       \
-using typename Base::Unit;        \
 private:
 
 }

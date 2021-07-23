@@ -4,9 +4,16 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/format.hpp>
 
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+
 #include <wx/toplevel.h>
 #include <wx/sizer.h>
 #include <wx/checkbox.h>
+#include <wx/dcclient.h>
+#include <wx/font.h>
+#include <wx/fontutil.h>
 
 #include "libslic3r/Config.hpp"
 
@@ -14,6 +21,12 @@
 namespace Slic3r {
 namespace GUI {
 
+#ifdef _WIN32
+wxDEFINE_EVENT(EVT_HID_DEVICE_ATTACHED, HIDDeviceAttachedEvent);
+wxDEFINE_EVENT(EVT_HID_DEVICE_DETACHED, HIDDeviceDetachedEvent);
+wxDEFINE_EVENT(EVT_VOLUME_ATTACHED, VolumeAttachedEvent);
+wxDEFINE_EVENT(EVT_VOLUME_DETACHED, VolumeDetachedEvent);
+#endif // _WIN32
 
 wxTopLevelWindow* find_toplevel_parent(wxWindow *window)
 {
@@ -26,6 +39,116 @@ wxTopLevelWindow* find_toplevel_parent(wxWindow *window)
     return nullptr;
 }
 
+void on_window_geometry(wxTopLevelWindow *tlw, std::function<void()> callback)
+{
+#ifdef _WIN32
+    // On windows, the wxEVT_SHOW is not received if the window is created maximized
+    // cf. https://groups.google.com/forum/#!topic/wx-users/c7ntMt6piRI
+    // OTOH the geometry is available very soon, so we can call the callback right away
+    callback();
+#elif defined __linux__
+    tlw->Bind(wxEVT_SHOW, [=](wxShowEvent &evt) {
+        // On Linux, the geometry is only available after wxEVT_SHOW + CallAfter
+        // cf. https://groups.google.com/forum/?pli=1#!topic/wx-users/fERSXdpVwAI
+        tlw->CallAfter([=]() { callback(); });
+        evt.Skip();
+    });
+#elif defined __APPLE__
+    tlw->Bind(wxEVT_SHOW, [=](wxShowEvent &evt) {
+        callback();
+        evt.Skip();
+    });
+#endif
+}
+
+#if !wxVERSION_EQUAL_OR_GREATER_THAN(3,1,3)
+wxDEFINE_EVENT(EVT_DPI_CHANGED_SLICER, DpiChangedEvent);
+#endif // !wxVERSION_EQUAL_OR_GREATER_THAN
+
+#ifdef _WIN32
+template<class F> typename F::FN winapi_get_function(const wchar_t *dll, const char *fn_name) {
+    static HINSTANCE dll_handle = LoadLibraryExW(dll, nullptr, 0);
+
+    if (dll_handle == nullptr) { return nullptr; }
+    return (typename F::FN)GetProcAddress(dll_handle, fn_name);
+}
+#endif
+
+// If called with nullptr, a DPI for the primary monitor is returned.
+int get_dpi_for_window(const wxWindow *window)
+{
+#ifdef _WIN32
+    enum MONITOR_DPI_TYPE_ {
+        // This enum is inlined here to avoid build-time dependency
+        MDT_EFFECTIVE_DPI_ = 0,
+        MDT_ANGULAR_DPI_ = 1,
+        MDT_RAW_DPI_ = 2,
+        MDT_DEFAULT_ = MDT_EFFECTIVE_DPI_,
+    };
+
+    // Need strong types for winapi_get_function() to work
+    struct GetDpiForWindow_t { typedef HRESULT (WINAPI *FN)(HWND hwnd); };
+    struct GetDpiForMonitor_t { typedef HRESULT (WINAPI *FN)(HMONITOR hmonitor, MONITOR_DPI_TYPE_ dpiType, UINT *dpiX, UINT *dpiY); };
+
+    static auto GetDpiForWindow_fn = winapi_get_function<GetDpiForWindow_t>(L"User32.dll", "GetDpiForWindow");
+    static auto GetDpiForMonitor_fn = winapi_get_function<GetDpiForMonitor_t>(L"Shcore.dll", "GetDpiForMonitor");
+
+	// Desktop Window is the window of the primary monitor.
+	const HWND hwnd = (window == nullptr) ? ::GetDesktopWindow() : window->GetHandle();
+
+    if (GetDpiForWindow_fn != nullptr) {
+        // We're on Windows 10, we have per-screen DPI settings
+        return GetDpiForWindow_fn(hwnd);
+    } else if (GetDpiForMonitor_fn != nullptr) {
+        // We're on Windows 8.1, we have per-system DPI
+        // Note: MonitorFromWindow() is available on all Windows.
+
+        const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        UINT dpiX;
+        UINT dpiY;
+        return GetDpiForMonitor_fn(monitor, MDT_EFFECTIVE_DPI_, &dpiX, &dpiY) == S_OK ? dpiX : DPI_DEFAULT;
+    } else {
+        // We're on Windows earlier than 8.1, use DC
+
+        const HDC hdc = GetDC(hwnd);
+        if (hdc == NULL) { return DPI_DEFAULT; }
+        return GetDeviceCaps(hdc, LOGPIXELSX);
+    }
+#elif defined __linux__
+    // TODO
+    return DPI_DEFAULT;
+#elif defined __APPLE__
+    // TODO
+    return DPI_DEFAULT;
+#else // freebsd and others
+    // TODO
+    return DPI_DEFAULT;
+#endif
+}
+
+wxFont get_default_font_for_dpi(const wxWindow *window, int dpi)
+{
+#ifdef _WIN32
+    // First try to load the font with the Windows 10 specific way.
+    struct SystemParametersInfoForDpi_t { typedef BOOL (WINAPI *FN)(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni, UINT dpi); };
+    static auto SystemParametersInfoForDpi_fn = winapi_get_function<SystemParametersInfoForDpi_t>(L"User32.dll", "SystemParametersInfoForDpi");
+    if (SystemParametersInfoForDpi_fn != nullptr) {
+        NONCLIENTMETRICS nm;
+        memset(&nm, 0, sizeof(NONCLIENTMETRICS));
+        nm.cbSize = sizeof(NONCLIENTMETRICS);
+        if (SystemParametersInfoForDpi_fn(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &nm, 0, dpi))
+            return wxFont(wxNativeFontInfo(nm.lfMessageFont, window));
+    }
+    // Then try to guesstimate the font DPI scaling on Windows 8.
+    // Let's hope that the font returned by the SystemParametersInfo(), which is used by wxWidgets internally, makes sense.
+    int dpi_primary = get_dpi_for_window(nullptr);
+    if (dpi_primary != dpi) {
+        // Rescale the font.
+        return wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).Scaled(float(dpi) / float(dpi_primary));
+    }
+#endif
+    return wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+}
 
 CheckboxFileDialog::ExtraPanel::ExtraPanel(wxWindow *parent)
     : wxPanel(parent, wxID_ANY)
@@ -141,6 +264,27 @@ std::string WindowMetrics::serialize() const
 std::ostream& operator<<(std::ostream &os, const WindowMetrics& metrics)
 {
     return os << '(' << metrics.serialize() << ')';
+}
+
+
+TaskTimer::TaskTimer(std::string task_name):
+    task_name(task_name.empty() ? "task" : task_name)
+{
+    start_timer = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch());
+}
+
+TaskTimer::~TaskTimer()
+{
+    std::chrono::milliseconds stop_timer = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch());
+    auto process_duration = std::chrono::milliseconds(stop_timer - start_timer).count();
+    std::string out = (boost::format("\n!!! %1% duration = %2% ms \n\n") % task_name % process_duration).str();
+    printf("%s", out.c_str());
+#ifdef __WXMSW__
+    std::wstring stemp = std::wstring(out.begin(), out.end());
+    OutputDebugString(stemp.c_str());
+#endif
 }
 
 

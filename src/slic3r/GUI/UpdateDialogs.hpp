@@ -3,8 +3,9 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
-#include "slic3r/Utils/Semver.hpp"
+#include "libslic3r/Semver.hpp"
 #include "MsgDialog.hpp"
 
 class wxBoxSizer;
@@ -30,8 +31,6 @@ public:
 	bool disable_version_check() const;
 
 private:
-	const Semver &ver_current;
-	const Semver &ver_online;
 	wxCheckBox *cbox;
 };
 
@@ -40,13 +39,55 @@ private:
 class MsgUpdateConfig : public MsgDialog
 {
 public:
-	// updates is a map of "vendor name" -> "version (comment)"
-	MsgUpdateConfig(const std::unordered_map<std::string, std::string> &updates);
+	struct Update
+	{
+		std::string vendor;
+		Semver version;
+		std::string comment;
+		std::string changelog_url;
+
+		Update(std::string vendor, Semver version, std::string comment, std::string changelog_url)
+			: vendor(std::move(vendor))
+			, version(std::move(version))
+			, comment(std::move(comment))
+			, changelog_url(std::move(changelog_url))
+		{}
+	};
+
+	// force_before_wizard - indicates that check of updated is forced before ConfigWizard opening
+	MsgUpdateConfig(const std::vector<Update> &updates, bool force_before_wizard = false);
 	MsgUpdateConfig(MsgUpdateConfig &&) = delete;
 	MsgUpdateConfig(const MsgUpdateConfig &) = delete;
 	MsgUpdateConfig &operator=(MsgUpdateConfig &&) = delete;
 	MsgUpdateConfig &operator=(const MsgUpdateConfig &) = delete;
 	~MsgUpdateConfig();
+};
+
+// Informs about currently installed bundles not being compatible with the running Slic3r. Asks about action.
+class MsgUpdateForced : public MsgDialog
+{
+public:
+	struct Update
+	{
+		std::string vendor;
+		Semver version;
+		std::string comment;
+		std::string changelog_url;
+
+		Update(std::string vendor, Semver version, std::string comment, std::string changelog_url)
+			: vendor(std::move(vendor))
+			, version(std::move(version))
+			, comment(std::move(comment))
+			, changelog_url(std::move(changelog_url))
+		{}
+	};
+
+	MsgUpdateForced(const std::vector<Update>& updates);
+	MsgUpdateForced(MsgUpdateForced&&) = delete;
+	MsgUpdateForced(const MsgUpdateForced&) = delete;
+	MsgUpdateForced& operator=(MsgUpdateForced&&) = delete;
+	MsgUpdateForced& operator=(const MsgUpdateForced&) = delete;
+	~MsgUpdateForced();
 };
 
 // Informs about currently installed bundles not being compatible with the running Slic3r. Asks about action.
@@ -74,6 +115,17 @@ public:
 	~MsgDataLegacy();
 };
 
+// Informs about absence of bundles requiring update.
+class MsgNoUpdates : public MsgDialog
+{
+public:
+	MsgNoUpdates();
+	MsgNoUpdates(MsgNoUpdates&&) = delete;
+	MsgNoUpdates(const MsgNoUpdates&) = delete;
+	MsgNoUpdates& operator=(MsgNoUpdates&&) = delete;
+	MsgNoUpdates& operator=(const MsgNoUpdates&) = delete;
+	~MsgNoUpdates();
+};
 
 }
 }

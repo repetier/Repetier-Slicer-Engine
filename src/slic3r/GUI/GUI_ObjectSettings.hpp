@@ -2,11 +2,15 @@
 #define slic3r_GUI_ObjectSettings_hpp_
 
 #include <memory>
+#include <vector>
 #include <wx/panel.h>
+#include "wxExtensions.hpp"
 
 class wxBoxSizer;
 
 namespace Slic3r {
+class DynamicPrintConfig;
+class ModelConfig;
 namespace GUI {
 class ConfigOptionsGroup;
 
@@ -26,6 +30,7 @@ public:
 
     virtual wxSizer*    get_sizer();
     ConfigOptionsGroup* get_og() { return m_og.get(); }
+    wxWindow*           parent() const {return m_parent; }
 };
 
 
@@ -36,12 +41,22 @@ class ObjectSettings : public OG_Settings
     // option groups for settings
     std::vector <std::shared_ptr<ConfigOptionsGroup>> m_og_settings;
 
+    ScalableBitmap m_bmp_delete;
+    ScalableBitmap m_bmp_delete_focus;
+
 public:
     ObjectSettings(wxWindow* parent);
     ~ObjectSettings() {}
 
-    void        update_settings_list();
+    bool        update_settings_list();
+    /* Additional check for override options: Add options, if its needed.
+     * Example: if Infill is set to 100%, and Fill Pattern is missed in config_to,
+     * we should add fill_pattern to avoid endless loop in update
+     */
+    bool        add_missed_options(ModelConfig *config_to, const DynamicPrintConfig &config_from);
+    void        update_config_values(ModelConfig *config);
     void        UpdateAndShow(const bool show) override;
+    void        msw_rescale();
 };
 
 }}

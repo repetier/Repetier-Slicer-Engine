@@ -3,6 +3,7 @@
 %{
 #include <xsinit.h>
 #include "libslic3r/PerimeterGenerator.hpp"
+#include "libslic3r/Layer.hpp"
 %}
 
 %name{Slic3r::Layer::PerimeterGenerator} class PerimeterGenerator {
@@ -15,11 +16,12 @@
             dynamic_cast<PrintRegionConfig*>(region_config),
             dynamic_cast<PrintObjectConfig*>(object_config),
             dynamic_cast<PrintConfig*>(print_config),
+            false,
             loops, gap_fill, fill_surfaces); %};
     ~PerimeterGenerator();
     
     void set_lower_slices(ExPolygonCollection* lower_slices)
-        %code{% THIS->lower_slices = lower_slices; %};
+        %code{% THIS->lower_slices = &lower_slices->expolygons; %};
     void set_layer_id(int layer_id)
         %code{% THIS->layer_id = layer_id; %};
     void set_perimeter_flow(Flow* flow)

@@ -17,7 +17,6 @@ class MultiPoint
 public:
     Points points;
     
-    operator Points() const;
     MultiPoint() {}
     MultiPoint(const MultiPoint &other) : points(other.points) {}
     MultiPoint(MultiPoint &&other) : points(std::move(other.points)) {}
@@ -27,14 +26,15 @@ public:
     MultiPoint& operator=(MultiPoint &&other) { points = std::move(other.points); return *this; }
     void scale(double factor);
     void scale(double factor_x, double factor_y);
-    void translate(double x, double y);
+    void translate(double x, double y) { this->translate(Point(coord_t(x), coord_t(y))); }
     void translate(const Point &vector);
     void rotate(double angle) { this->rotate(cos(angle), sin(angle)); }
     void rotate(double cos_angle, double sin_angle);
     void rotate(double angle, const Point &center);
-    void reverse();
-    Point first_point() const;
-    virtual Point last_point() const = 0;
+    void reverse() { std::reverse(this->points.begin(), this->points.end()); }
+
+    const Point& first_point() const { return this->points.front(); }
+    virtual const Point& last_point() const = 0;
     virtual Lines lines() const = 0;
     size_t size() const { return points.size(); }
     bool   empty() const { return points.empty(); }
@@ -79,7 +79,8 @@ public:
 
     bool intersection(const Line& line, Point* intersection) const;
     bool first_intersection(const Line& line, Point* intersection) const;
-    
+    bool intersections(const Line &line, Points *intersections) const;
+
     static Points _douglas_peucker(const Points &points, const double tolerance);
     static Points visivalingam(const Points& pts, const double& tolerance);
 };

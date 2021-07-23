@@ -1,1 +1,5 @@
-add_subdirectory(slabasebed)
+#add_subdirectory(slasupporttree)
+#add_subdirectory(openvdb)
+add_subdirectory(meshboolean)
+add_subdirectory(opencsg)
+#add_subdirectory(aabb-evaluation)

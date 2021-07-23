@@ -52,6 +52,10 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+
+# Use the new builtin CMake function if possible or fall back to the old one.
+if (CMAKE_VERSION VERSION_LESS 3.16)
+
 include(CMakeParseArguments)
 
 macro(combine_arguments _variable)
@@ -102,9 +106,16 @@ function(export_all_flags _filename)
 endfunction()
 
 function(add_precompiled_header _target _input)
+
+  message(STATUS "Adding precompiled header ${_input} to target ${_target} with legacy method. "
+                 "Update your cmake instance to use the native PCH functions.")
+
   cmake_parse_arguments(_PCH "FORCEINCLUDE" "SOURCE_CXX;SOURCE_C" "" ${ARGN})
 
   get_filename_component(_input_we ${_input} NAME_WE)
+  get_filename_component(_input_full ${_input} ABSOLUTE)
+  file(TO_NATIVE_PATH "${_input_full}" _input_fullpath)
+
   if(NOT _PCH_SOURCE_CXX)
     set(_PCH_SOURCE_CXX "${_input_we}.cpp")
   endif()
@@ -138,16 +149,16 @@ function(add_precompiled_header _target _input)
           set_source_files_properties("${_source}" PROPERTIES OBJECT_OUTPUTS "${_pch_c_pch}")
         else()
           if(_source MATCHES \\.\(cpp|cxx|cc\)$)
-            set(_pch_compile_flags "${_pch_compile_flags} \"/Fp${_pch_cxx_pch}\" \"/Yu${_input}\"")
+            set(_pch_compile_flags "${_pch_compile_flags} \"/Fp${_pch_cxx_pch}\" \"/Yu${_input_fullpath}\"")
             set(_pch_source_cxx_needed TRUE)
             set_source_files_properties("${_source}" PROPERTIES OBJECT_DEPENDS "${_pch_cxx_pch}")
           else()
-            set(_pch_compile_flags "${_pch_compile_flags} \"/Fp${_pch_c_pch}\" \"/Yu${_input}\"")
+            set(_pch_compile_flags "${_pch_compile_flags} \"/Fp${_pch_c_pch}\" \"/Yu${_input_fullpath}\"")
             set(_pch_source_c_needed TRUE)
             set_source_files_properties("${_source}" PROPERTIES OBJECT_DEPENDS "${_pch_c_pch}")
           endif()
           if(_PCH_FORCEINCLUDE)
-            set(_pch_compile_flags "${_pch_compile_flags} /FI${_input}")
+            set(_pch_compile_flags "${_pch_compile_flags} /FI${_input_fullpath}")
           endif(_PCH_FORCEINCLUDE)
         endif()
 
@@ -238,3 +249,21 @@ function(add_precompiled_header _target _input)
     endforeach()
   endif(CMAKE_COMPILER_IS_GNUCXX)
 endfunction()
+
+else ()
+
+function(add_precompiled_header _target _input)
+    message(STATUS "Adding precompiled header ${_input} to target ${_target}.")
+    target_precompile_headers(${_target} PRIVATE ${_input})
+
+    get_target_property(_sources ${_target} SOURCES)
+    list(FILTER _sources INCLUDE REGEX ".*\\.mm?")
+
+    if (_sources)
+        message(STATUS "PCH skipping sources: ${_sources}")
+    endif ()
+
+    set_source_files_properties(${_sources} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+endfunction()
+
+endif (CMAKE_VERSION VERSION_LESS 3.16)

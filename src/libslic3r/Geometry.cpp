@@ -1,19 +1,24 @@
 #include "libslic3r.h"
+#include "Exception.hpp"
 #include "Geometry.hpp"
 #include "ClipperUtils.hpp"
 #include "ExPolygon.hpp"
 #include "Line.hpp"
-#include "PolylineCollection.hpp"
 #include "clipper.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <list>
 #include <map>
+#include <numeric>
 #include <set>
 #include <utility>
 #include <stack>
 #include <vector>
+
+#include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/log/trivial.hpp>
 
 #ifdef SLIC3R_DEBUG
 #include "SVG.hpp"
@@ -309,49 +314,7 @@ convex_hull(const Polygons &polygons)
     return convex_hull(std::move(pp));
 }
 
-/* accepts an arrayref of points and returns a list of indices
-   according to a nearest-neighbor walk */
-void
-chained_path(const Points &points, std::vector<Points::size_type> &retval, Point start_near)
-{
-    PointConstPtrs my_points;
-    std::map<const Point*,Points::size_type> indices;
-    my_points.reserve(points.size());
-    for (Points::const_iterator it = points.begin(); it != points.end(); ++it) {
-        my_points.push_back(&*it);
-        indices[&*it] = it - points.begin();
-    }
-    
-    retval.reserve(points.size());
-    while (!my_points.empty()) {
-        Points::size_type idx = start_near.nearest_point_index(my_points);
-        start_near = *my_points[idx];
-        retval.push_back(indices[ my_points[idx] ]);
-        my_points.erase(my_points.begin() + idx);
-    }
-}
-
-void
-chained_path(const Points &points, std::vector<Points::size_type> &retval)
-{
-    if (points.empty()) return;  // can't call front() on empty vector
-    chained_path(points, retval, points.front());
-}
-
-/* retval and items must be different containers */
-template<class T>
-void
-chained_path_items(Points &points, T &items, T &retval)
-{
-    std::vector<Points::size_type> indices;
-    chained_path(points, indices);
-    for (std::vector<Points::size_type>::const_iterator it = indices.begin(); it != indices.end(); ++it)
-        retval.push_back(items[*it]);
-}
-template void chained_path_items(Points &points, ClipperLib::PolyNodes &items, ClipperLib::PolyNodes &retval);
-
-bool
-directions_parallel(double angle1, double angle2, double max_diff)
+bool directions_parallel(double angle1, double angle2, double max_diff)
 {
     double diff = fabs(angle1 - angle2);
     max_diff += EPSILON;
@@ -359,8 +322,7 @@ directions_parallel(double angle1, double angle2, double max_diff)
 }
 
 template<class T>
-bool
-contains(const std::vector<T> &vector, const Point &point)
+bool contains(const std::vector<T> &vector, const Point &point)
 {
     for (typename std::vector<T>::const_iterator it = vector.begin(); it != vector.end(); ++it) {
         if (it->contains(point)) return true;
@@ -369,16 +331,101 @@ contains(const std::vector<T> &vector, const Point &point)
 }
 template bool contains(const ExPolygons &vector, const Point &point);
 
-double
-rad2deg_dir(double angle)
+double rad2deg_dir(double angle)
 {
     angle = (angle < PI) ? (-angle + PI/2.0) : (angle + PI/2.0);
     if (angle < 0) angle += PI;
     return rad2deg(angle);
 }
 
-void
-simplify_polygons(const Polygons &polygons, double tolerance, Polygons* retval)
+Point circle_center_taubin_newton(const Points::const_iterator& input_begin, const Points::const_iterator& input_end, size_t cycles)
+{
+    Vec2ds tmp;
+    tmp.reserve(std::distance(input_begin, input_end));
+    std::transform(input_begin, input_end, std::back_inserter(tmp), [] (const Point& in) { return unscale(in); } );
+    Vec2d center = circle_center_taubin_newton(tmp.cbegin(), tmp.end(), cycles);
+	return Point::new_scale(center.x(), center.y());
+}
+
+/// Adapted from work in "Circular and Linear Regression: Fitting circles and lines by least squares", pg 126
+/// Returns a point corresponding to the center of a circle for which all of the points from input_begin to input_end
+/// lie on.
+Vec2d circle_center_taubin_newton(const Vec2ds::const_iterator& input_begin, const Vec2ds::const_iterator& input_end, size_t cycles)
+{
+    // calculate the centroid of the data set
+    const Vec2d sum = std::accumulate(input_begin, input_end, Vec2d(0,0));
+    const size_t n = std::distance(input_begin, input_end);
+    const double n_flt = static_cast<double>(n);
+    const Vec2d centroid { sum / n_flt };
+
+    // Compute the normalized moments of the data set.
+    double Mxx = 0, Myy = 0, Mxy = 0, Mxz = 0, Myz = 0, Mzz = 0;
+    for (auto it = input_begin; it < input_end; ++it) {
+        // center/normalize the data.
+        double Xi {it->x() - centroid.x()};
+        double Yi {it->y() - centroid.y()};
+        double Zi {Xi*Xi + Yi*Yi};
+        Mxy += (Xi*Yi);
+        Mxx += (Xi*Xi);
+        Myy += (Yi*Yi);
+        Mxz += (Xi*Zi);
+        Myz += (Yi*Zi);
+        Mzz += (Zi*Zi);
+    }
+
+    // divide by number of points to get the moments
+    Mxx /= n_flt;
+    Myy /= n_flt;
+    Mxy /= n_flt;
+    Mxz /= n_flt;
+    Myz /= n_flt;
+    Mzz /= n_flt;
+
+    // Compute the coefficients of the characteristic polynomial for the circle
+    // eq 5.60
+    const double Mz {Mxx + Myy}; // xx + yy = z
+    const double Cov_xy {Mxx*Myy - Mxy*Mxy}; // this shows up a couple times so cache it here.
+    const double C3 {4.0*Mz};
+    const double C2 {-3.0*(Mz*Mz) - Mzz};
+    const double C1 {Mz*(Mzz - (Mz*Mz)) + 4.0*Mz*Cov_xy - (Mxz*Mxz) - (Myz*Myz)};
+    const double C0 {(Mxz*Mxz)*Myy + (Myz*Myz)*Mxx - 2.0*Mxz*Myz*Mxy - Cov_xy*(Mzz - (Mz*Mz))};
+
+    const double C22 = {C2 + C2};
+    const double C33 = {C3 + C3 + C3};
+
+    // solve the characteristic polynomial with Newton's method.
+    double xnew = 0.0;
+    double ynew = 1e20;
+
+    for (size_t i = 0; i < cycles; ++i) {
+        const double yold {ynew};
+        ynew = C0 + xnew * (C1 + xnew*(C2 + xnew * C3));
+        if (std::abs(ynew) > std::abs(yold)) {
+			BOOST_LOG_TRIVIAL(error) << "Geometry: Fit is going in the wrong direction.\n";
+            return Vec2d(std::nan(""), std::nan(""));
+        }
+        const double Dy {C1 + xnew*(C22 + xnew*C33)};
+
+        const double xold {xnew};
+        xnew = xold - (ynew / Dy);
+
+        if (std::abs((xnew-xold) / xnew) < 1e-12) i = cycles; // converged, we're done here
+
+        if (xnew < 0) {
+            // reset, we went negative
+            xnew = 0.0;
+        }
+    }
+    
+    // compute the determinant and the circle's parameters now that we've solved.
+    double DET = xnew*xnew - xnew*Mz + Cov_xy;
+
+    Vec2d center(Mxz * (Myy - xnew) - Myz * Mxy, Myz * (Mxx - xnew) - Mxz*Mxy);
+    center /= (DET * 2.);
+    return center + centroid;
+}
+
+void simplify_polygons(const Polygons &polygons, double tolerance, Polygons* retval)
 {
     Polygons pp;
     for (Polygons::const_iterator it = polygons.begin(); it != polygons.end(); ++it) {
@@ -391,8 +438,7 @@ simplify_polygons(const Polygons &polygons, double tolerance, Polygons* retval)
     *retval = Slic3r::simplify_polygons(pp);
 }
 
-double
-linint(double value, double oldmin, double oldmax, double newmin, double newmax)
+double linint(double value, double oldmin, double oldmax, double newmin, double newmax)
 {
     return (value - oldmin) * (newmax - newmin) / (oldmax - oldmin) + newmin;
 }
@@ -426,7 +472,7 @@ Pointfs arrange(size_t num_parts, const Vec2d &part_size, coordf_t gap, const Bo
     size_t cellw = size_t(floor((bed_bbox.size()(0) + gap) / cell_size(0)));
     size_t cellh = size_t(floor((bed_bbox.size()(1) + gap) / cell_size(1)));
     if (num_parts > cellw * cellh)
-        throw std::invalid_argument(PRINTF_ZU " parts won't fit in your print area!\n", num_parts);
+        throw Slic3r::InvalidArgument("%zu parts won't fit in your print area!\n", num_parts);
     
     // Get a bounding box of cellw x cellh cells, centered at the center of the bed.
     Vec2d       cells_size(cellw * cell_size(0) - gap, cellh * cell_size(1) - gap);
@@ -618,7 +664,6 @@ namespace Voronoi { namespace Internal {
     typedef boost::polygon::point_data<coordinate_type> point_type;
     typedef boost::polygon::segment_data<coordinate_type> segment_type;
     typedef boost::polygon::rectangle_data<coordinate_type> rect_type;
-//    typedef voronoi_builder<int> VB;
     typedef boost::polygon::voronoi_diagram<coordinate_type> VD;
     typedef VD::cell_type cell_type;
     typedef VD::cell_type::source_index_type source_index_type;
@@ -665,15 +710,15 @@ namespace Voronoi { namespace Internal {
         if (cell1.contains_point() && cell2.contains_point()) {
             point_type p1 = retrieve_point(segments, cell1);
             point_type p2 = retrieve_point(segments, cell2);
-            origin.x((p1(0) + p2(0)) * 0.5);
-            origin.y((p1(1) + p2(1)) * 0.5);
-            direction.x(p1(1) - p2(1));
-            direction.y(p2(0) - p1(0));
+            origin.x((p1.x() + p2.x()) * 0.5);
+            origin.y((p1.y() + p2.y()) * 0.5);
+            direction.x(p1.y() - p2.y());
+            direction.y(p2.x() - p1.x());
         } else {
             origin = cell1.contains_segment() ? retrieve_point(segments, cell2) : retrieve_point(segments, cell1);
             segment_type segment = cell1.contains_segment() ? segments[cell1.source_index()] : segments[cell2.source_index()];
-            coordinate_type dx = high(segment)(0) - low(segment)(0);
-            coordinate_type dy = high(segment)(1) - low(segment)(1);
+            coordinate_type dx = high(segment).x() - low(segment).x();
+            coordinate_type dy = high(segment).y() - low(segment).y();
             if ((low(segment) == origin) ^ cell1.contains_point()) {
                 direction.x(dy);
                 direction.y(-dx);
@@ -682,19 +727,19 @@ namespace Voronoi { namespace Internal {
                 direction.y(dx);
             }
         }
-        coordinate_type koef = bbox_max_size / (std::max)(fabs(direction(0)), fabs(direction(1)));
+        coordinate_type koef = bbox_max_size / (std::max)(fabs(direction.x()), fabs(direction.y()));
         if (edge.vertex0() == NULL) {
             clipped_edge->push_back(point_type(
-                origin(0) - direction(0) * koef,
-                origin(1) - direction(1) * koef));
+                origin.x() - direction.x() * koef,
+                origin.y() - direction.y() * koef));
         } else {
             clipped_edge->push_back(
                 point_type(edge.vertex0()->x(), edge.vertex0()->y()));
         }
         if (edge.vertex1() == NULL) {
             clipped_edge->push_back(point_type(
-                origin(0) + direction(0) * koef,
-                origin(1) + direction(1) * koef));
+                origin.x() + direction.x() * koef,
+                origin.y() + direction.y() * koef));
         } else {
             clipped_edge->push_back(
                 point_type(edge.vertex1()->x(), edge.vertex1()->y()));
@@ -714,7 +759,7 @@ namespace Voronoi { namespace Internal {
 
 } /* namespace Internal */ } // namespace Voronoi
 
-static inline void dump_voronoi_to_svg(const Lines &lines, /* const */ voronoi_diagram<double> &vd, const ThickPolylines *polylines, const char *path)
+static inline void dump_voronoi_to_svg(const Lines &lines, /* const */ boost::polygon::voronoi_diagram<double> &vd, const ThickPolylines *polylines, const char *path)
 {
     const double        scale                       = 0.2;
     const std::string   inputSegmentPointColor      = "lightseagreen";
@@ -758,7 +803,7 @@ static inline void dump_voronoi_to_svg(const Lines &lines, /* const */ voronoi_d
             Voronoi::Internal::point_type(double(it->b(0)), double(it->b(1)))));
     
     // Color exterior edges.
-    for (voronoi_diagram<double>::const_edge_iterator it = vd.edges().begin(); it != vd.edges().end(); ++it)
+    for (boost::polygon::voronoi_diagram<double>::const_edge_iterator it = vd.edges().begin(); it != vd.edges().end(); ++it)
         if (!it->is_finite())
             Voronoi::Internal::color_exterior(&(*it));
 
@@ -773,11 +818,11 @@ static inline void dump_voronoi_to_svg(const Lines &lines, /* const */ voronoi_d
 
 #if 1
     // Draw voronoi vertices.
-    for (voronoi_diagram<double>::const_vertex_iterator it = vd.vertices().begin(); it != vd.vertices().end(); ++it)
+    for (boost::polygon::voronoi_diagram<double>::const_vertex_iterator it = vd.vertices().begin(); it != vd.vertices().end(); ++it)
         if (! internalEdgesOnly || it->color() != Voronoi::Internal::EXTERNAL_COLOR)
-            svg.draw(Point(coord_t((*it)(0)), coord_t((*it)(1))), voronoiPointColor, voronoiPointRadius);
+            svg.draw(Point(coord_t(it->x()), coord_t(it->y())), voronoiPointColor, voronoiPointRadius);
 
-    for (voronoi_diagram<double>::const_edge_iterator it = vd.edges().begin(); it != vd.edges().end(); ++it) {
+    for (boost::polygon::voronoi_diagram<double>::const_edge_iterator it = vd.edges().begin(); it != vd.edges().end(); ++it) {
         if (primaryEdgesOnly && !it->is_primary())
             continue;
         if (internalEdgesOnly && (it->color() == Voronoi::Internal::EXTERNAL_COLOR))
@@ -800,7 +845,7 @@ static inline void dump_voronoi_to_svg(const Lines &lines, /* const */ voronoi_d
                 color = voronoiLineColorSecondary;
         }
         for (std::size_t i = 0; i + 1 < samples.size(); ++i)
-            svg.draw(Line(Point(coord_t(samples[i](0)), coord_t(samples[i](1))), Point(coord_t(samples[i+1](0)), coord_t(samples[i+1](1)))), color, voronoiLineWidth);
+            svg.draw(Line(Point(coord_t(samples[i].x()), coord_t(samples[i].y())), Point(coord_t(samples[i+1].x()), coord_t(samples[i+1].y()))), color, voronoiLineWidth);
     }
 #endif
 
@@ -912,7 +957,7 @@ MedialAxis::build(ThickPolylines* polylines)
     }
     */
     
-    typedef const VD::vertex_type vert_t;
+    //typedef const VD::vertex_type vert_t;
     typedef const VD::edge_type   edge_t;
     
     // collect valid edges (i.e. prune those not belonging to MAT)
@@ -1143,14 +1188,12 @@ MedialAxis::validate_edge(const VD::edge_type* edge)
     return true;
 }
 
-const Line&
-MedialAxis::retrieve_segment(const VD::cell_type* cell) const
+const Line& MedialAxis::retrieve_segment(const VD::cell_type* cell) const
 {
     return this->lines[cell->source_index()];
 }
 
-const Point&
-MedialAxis::retrieve_endpoint(const VD::cell_type* cell) const
+const Point& MedialAxis::retrieve_endpoint(const VD::cell_type* cell) const
 {
     const Line& line = this->retrieve_segment(cell);
     if (cell->source_category() == SOURCE_CATEGORY_SEGMENT_START_POINT) {
@@ -1164,11 +1207,8 @@ void assemble_transform(Transform3d& transform, const Vec3d& translation, const 
 {
     transform = Transform3d::Identity();
     transform.translate(translation);
-    transform.rotate(Eigen::AngleAxisd(rotation(2), Vec3d::UnitZ()));
-    transform.rotate(Eigen::AngleAxisd(rotation(1), Vec3d::UnitY()));
-    transform.rotate(Eigen::AngleAxisd(rotation(0), Vec3d::UnitX()));
-    transform.scale(scale);
-    transform.scale(mirror);
+    transform.rotate(Eigen::AngleAxisd(rotation(2), Vec3d::UnitZ()) * Eigen::AngleAxisd(rotation(1), Vec3d::UnitY()) * Eigen::AngleAxisd(rotation(0), Vec3d::UnitX()));
+    transform.scale(scale.cwiseProduct(mirror));
 }
 
 Transform3d assemble_transform(const Vec3d& translation, const Vec3d& rotation, const Vec3d& scale, const Vec3d& mirror)
@@ -1180,11 +1220,10 @@ Transform3d assemble_transform(const Vec3d& translation, const Vec3d& rotation, 
 
 Vec3d extract_euler_angles(const Eigen::Matrix<double, 3, 3, Eigen::DontAlign>& rotation_matrix)
 {
-#if ENABLE_NEW_EULER_ANGLES
     // reference: http://www.gregslabaugh.net/publications/euler.pdf
     Vec3d angles1 = Vec3d::Zero();
     Vec3d angles2 = Vec3d::Zero();
-    if (is_approx(std::abs(rotation_matrix(2, 0)), 1.0))
+    if (std::abs(std::abs(rotation_matrix(2, 0)) - 1.0) < 1e-5)
     {
         angles1(2) = 0.0;
         if (rotation_matrix(2, 0) < 0.0) // == -1.0
@@ -1219,40 +1258,7 @@ Vec3d extract_euler_angles(const Eigen::Matrix<double, 3, 3, Eigen::DontAlign>& 
     double min_2 = angles2.cwiseAbs().minCoeff();
     bool use_1 = (min_1 < min_2) || (is_approx(min_1, min_2) && (angles1.norm() <= angles2.norm()));
 
-    Vec3d angles = use_1 ? angles1 : angles2;
-#else
-    auto y_only = [](const Eigen::Matrix<double, 3, 3, Eigen::DontAlign>& matrix) -> bool {
-        return (matrix(0, 1) == 0.0) && (matrix(1, 0) == 0.0) && (matrix(1, 1) == 1.0) && (matrix(1, 2) == 0.0) && (matrix(2, 1) == 0.0);
-    };
-
-    // see: https://www.learnopencv.com/rotation-matrix-to-euler-angles/
-    double cy_abs = ::sqrt(sqr(rotation_matrix(0, 0)) + sqr(rotation_matrix(1, 0)));
-
-    Vec3d angles = Vec3d::Zero();
-
-    if (cy_abs >= 1e-6)
-    {
-        angles(0) = ::atan2(rotation_matrix(2, 1), rotation_matrix(2, 2));
-        angles(1) = ::atan2(-rotation_matrix(2, 0), cy_abs);
-        angles(2) = ::atan2(rotation_matrix(1, 0), rotation_matrix(0, 0));
-
-        // this is an hack to try to avoid this function to return "strange" values due to gimbal lock
-        if (y_only(rotation_matrix) && (angles(0) == (double)PI) && (angles(2) == (double)PI))
-        {
-            angles(0) = 0.0;
-            angles(1) = ::atan2(rotation_matrix(2, 0), cy_abs) - (double)PI;
-            angles(2) = 0.0;
-        }
-    }
-    else
-    {
-        angles(0) = 0.0;
-        angles(1) = ::atan2(-rotation_matrix(2, 0), cy_abs);
-        angles(2) = (angles(1) >= 0.0) ? ::atan2(rotation_matrix(1, 2), rotation_matrix(1, 1)) : ::atan2(-rotation_matrix(1, 2), rotation_matrix(1, 1));
-    }
-#endif // ENABLE_NEW_EULER_ANGLES
-
-    return angles;
+    return use_1 ? angles1 : angles2;
 }
 
 Vec3d extract_euler_angles(const Transform3d& transform)
@@ -1288,18 +1294,8 @@ void Transformation::Flags::set(bool dont_translate, bool dont_rotate, bool dont
 }
 
 Transformation::Transformation()
-#if !ENABLE_VOLUMES_CENTERING_FIXES
-    : m_offset(Vec3d::Zero())
-    , m_rotation(Vec3d::Zero())
-    , m_scaling_factor(Vec3d::Ones())
-    , m_mirror(Vec3d::Ones())
-    , m_matrix(Transform3d::Identity())
-    , m_dirty(false)
-#endif // !ENABLE_VOLUMES_CENTERING_FIXES
 {
-#if ENABLE_VOLUMES_CENTERING_FIXES
     reset();
-#endif // ENABLE_VOLUMES_CENTERING_FIXES
 }
 
 Transformation::Transformation(const Transform3d& transform)
@@ -1333,6 +1329,8 @@ void Transformation::set_rotation(const Vec3d& rotation)
 void Transformation::set_rotation(Axis axis, double rotation)
 {
     rotation = angle_to_0_2PI(rotation);
+    if (is_approx(std::abs(rotation), 2.0 * (double)PI))
+        rotation = 0.0;
 
     if (m_rotation(axis) != rotation)
     {
@@ -1418,7 +1416,6 @@ void Transformation::set_from_transform(const Transform3d& transform)
 //        std::cout << "something went wrong in extracting data from matrix" << std::endl;
 }
 
-#if ENABLE_VOLUMES_CENTERING_FIXES
 void Transformation::reset()
 {
     m_offset = Vec3d::Zero();
@@ -1428,7 +1425,6 @@ void Transformation::reset()
     m_matrix = Transform3d::Identity();
     m_dirty = false;
 }
-#endif // ENABLE_VOLUMES_CENTERING_FIXES
 
 const Transform3d& Transformation::get_matrix(bool dont_translate, bool dont_rotate, bool dont_scale, bool dont_mirror) const
 {
@@ -1451,6 +1447,114 @@ const Transform3d& Transformation::get_matrix(bool dont_translate, bool dont_rot
 Transformation Transformation::operator * (const Transformation& other) const
 {
     return Transformation(get_matrix() * other.get_matrix());
+}
+
+Transformation Transformation::volume_to_bed_transformation(const Transformation& instance_transformation, const BoundingBoxf3& bbox)
+{
+    Transformation out;
+
+    if (instance_transformation.is_scaling_uniform()) {
+        // No need to run the non-linear least squares fitting for uniform scaling.
+        // Just set the inverse.
+        out.set_from_transform(instance_transformation.get_matrix(true).inverse());
+    }
+    else if (is_rotation_ninety_degrees(instance_transformation.get_rotation()))
+    {
+        // Anisotropic scaling, rotation by multiples of ninety degrees.
+        Eigen::Matrix3d instance_rotation_trafo =
+            (Eigen::AngleAxisd(instance_transformation.get_rotation().z(), Vec3d::UnitZ()) *
+            Eigen::AngleAxisd(instance_transformation.get_rotation().y(), Vec3d::UnitY()) *
+            Eigen::AngleAxisd(instance_transformation.get_rotation().x(), Vec3d::UnitX())).toRotationMatrix();
+        Eigen::Matrix3d volume_rotation_trafo =
+            (Eigen::AngleAxisd(-instance_transformation.get_rotation().x(), Vec3d::UnitX()) *
+            Eigen::AngleAxisd(-instance_transformation.get_rotation().y(), Vec3d::UnitY()) *
+            Eigen::AngleAxisd(-instance_transformation.get_rotation().z(), Vec3d::UnitZ())).toRotationMatrix();
+
+        // 8 corners of the bounding box.
+        auto pts = Eigen::MatrixXd(8, 3);
+        pts(0, 0) = bbox.min.x(); pts(0, 1) = bbox.min.y(); pts(0, 2) = bbox.min.z();
+        pts(1, 0) = bbox.min.x(); pts(1, 1) = bbox.min.y(); pts(1, 2) = bbox.max.z();
+        pts(2, 0) = bbox.min.x(); pts(2, 1) = bbox.max.y(); pts(2, 2) = bbox.min.z();
+        pts(3, 0) = bbox.min.x(); pts(3, 1) = bbox.max.y(); pts(3, 2) = bbox.max.z();
+        pts(4, 0) = bbox.max.x(); pts(4, 1) = bbox.min.y(); pts(4, 2) = bbox.min.z();
+        pts(5, 0) = bbox.max.x(); pts(5, 1) = bbox.min.y(); pts(5, 2) = bbox.max.z();
+        pts(6, 0) = bbox.max.x(); pts(6, 1) = bbox.max.y(); pts(6, 2) = bbox.min.z();
+        pts(7, 0) = bbox.max.x(); pts(7, 1) = bbox.max.y(); pts(7, 2) = bbox.max.z();
+
+        // Corners of the bounding box transformed into the modifier mesh coordinate space, with inverse rotation applied to the modifier.
+        auto qs = pts *
+            (instance_rotation_trafo *
+            Eigen::Scaling(instance_transformation.get_scaling_factor().cwiseProduct(instance_transformation.get_mirror())) *
+            volume_rotation_trafo).inverse().transpose();
+        // Fill in scaling based on least squares fitting of the bounding box corners.
+        Vec3d scale;
+        for (int i = 0; i < 3; ++i)
+            scale(i) = pts.col(i).dot(qs.col(i)) / pts.col(i).dot(pts.col(i));
+
+        out.set_rotation(Geometry::extract_euler_angles(volume_rotation_trafo));
+        out.set_scaling_factor(Vec3d(std::abs(scale(0)), std::abs(scale(1)), std::abs(scale(2))));
+        out.set_mirror(Vec3d(scale(0) > 0 ? 1. : -1, scale(1) > 0 ? 1. : -1, scale(2) > 0 ? 1. : -1));
+    }
+    else
+    {
+        // General anisotropic scaling, general rotation.
+        // Keep the modifier mesh in the instance coordinate system, so the modifier mesh will not be aligned with the world.
+        // Scale it to get the required size.
+        out.set_scaling_factor(instance_transformation.get_scaling_factor().cwiseInverse());
+    }
+
+    return out;
+}
+
+// For parsing a transformation matrix from 3MF / AMF.
+Transform3d transform3d_from_string(const std::string& transform_str)
+{
+    Transform3d transform = Transform3d::Identity();
+
+    if (!transform_str.empty())
+    {
+        std::vector<std::string> mat_elements_str;
+        boost::split(mat_elements_str, transform_str, boost::is_any_of(" "), boost::token_compress_on);
+
+        unsigned int size = (unsigned int)mat_elements_str.size();
+        if (size == 16)
+        {
+            unsigned int i = 0;
+            for (unsigned int r = 0; r < 4; ++r)
+            {
+                for (unsigned int c = 0; c < 4; ++c)
+                {
+                    transform(r, c) = ::atof(mat_elements_str[i++].c_str());
+                }
+            }
+        }
+    }
+
+    return transform;
+}
+
+Eigen::Quaterniond rotation_xyz_diff(const Vec3d &rot_xyz_from, const Vec3d &rot_xyz_to)
+{
+    return
+        // From the current coordinate system to world.
+        Eigen::AngleAxisd(rot_xyz_to(2), Vec3d::UnitZ()) * Eigen::AngleAxisd(rot_xyz_to(1), Vec3d::UnitY()) * Eigen::AngleAxisd(rot_xyz_to(0), Vec3d::UnitX()) *
+        // From world to the initial coordinate system.
+        Eigen::AngleAxisd(-rot_xyz_from(0), Vec3d::UnitX()) * Eigen::AngleAxisd(-rot_xyz_from(1), Vec3d::UnitY()) * Eigen::AngleAxisd(-rot_xyz_from(2), Vec3d::UnitZ());
+}
+
+// This should only be called if it is known, that the two rotations only differ in rotation around the Z axis.
+double rotation_diff_z(const Vec3d &rot_xyz_from, const Vec3d &rot_xyz_to)
+{
+    Eigen::AngleAxisd angle_axis(rotation_xyz_diff(rot_xyz_from, rot_xyz_to));
+    Vec3d  axis  = angle_axis.axis();
+    double angle = angle_axis.angle();
+#ifndef NDEBUG
+    if (std::abs(angle) > 1e-8) {
+        assert(std::abs(axis.x()) < 1e-8);
+        assert(std::abs(axis.y()) < 1e-8);
+    }
+#endif /* NDEBUG */
+    return (axis.z() < 0) ? -angle : angle;
 }
 
 } }

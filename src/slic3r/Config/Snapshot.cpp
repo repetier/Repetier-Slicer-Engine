@@ -1,21 +1,29 @@
 #include "Snapshot.hpp"
-#include "../GUI/AppConfig.hpp"
-#include "../GUI/PresetBundle.hpp"
-#include "../Utils/Time.hpp"
 
 #include <time.h>
 
 #include <boost/algorithm/string/predicate.hpp>
-#include <boost/algorithm/string/trim.hpp>
 #include <boost/nowide/cstdio.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/property_tree/ini_parser.hpp>
-#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/ptree_fwd.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/log/trivial.hpp>
 
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/format.hpp"
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Time.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/FileParserError.hpp"
 #include "libslic3r/Utils.hpp"
+
+#include "../GUI/GUI.hpp"
+#include "../GUI/GUI_App.hpp"
+#include "../GUI/I18N.hpp"
+#include "../GUI/MainFrame.hpp"
+
+#include <wx/richmsgdlg.h>
 
 #define SLIC3R_SNAPSHOTS_DIR "snapshots"
 #define SLIC3R_SNAPSHOT_FILE "snapshot.ini"
@@ -32,8 +40,11 @@ void Snapshot::clear()
 	this->comment.clear();
 	this->reason = SNAPSHOT_UNKNOWN;
 	this->print.clear();
+    this->sla_print.clear();
 	this->filaments.clear();
+    this->sla_material.clear();
 	this->printer.clear();
+    this->physical_printer.clear();
 }
 
 void Snapshot::load_ini(const std::string &path)
@@ -66,7 +77,7 @@ void Snapshot::load_ini(const std::string &path)
                 if (kvp.first == "id")
                     this->id = kvp.second.data();
                 else if (kvp.first == "time_captured") {
-                	this->time_captured = Slic3r::Utils::parse_time_ISO8601Z(kvp.second.data());
+                	this->time_captured = Slic3r::Utils::parse_iso_utc_timestamp(kvp.second.data());
 					if (this->time_captured == (time_t)-1)
 				        throw_on_parse_error("invalid timestamp");
                 } else if (kvp.first == "slic3r_version_captured") {
@@ -95,6 +106,8 @@ void Snapshot::load_ini(const std::string &path)
             for (auto &kvp : section.second) {
                 if (kvp.first == "print") {
                     this->print = kvp.second.data();
+                } else if (kvp.first == "sla_print") {
+                    this->sla_print = kvp.second.data();
                 } else if (boost::starts_with(kvp.first, "filament")) {
                     int idx = 0;
                     if (kvp.first == "filament" || sscanf(kvp.first.c_str(), "filament_%d", &idx) == 1) {
@@ -102,8 +115,12 @@ void Snapshot::load_ini(const std::string &path)
                             this->filaments.resize(idx + 1, std::string());
                         this->filaments[idx] = kvp.second.data();
                     }
+                } else if (kvp.first == "sla_material") {
+                    this->sla_material = kvp.second.data();
                 } else if (kvp.first == "printer") {
                     this->printer = kvp.second.data();
+                } else if (kvp.first == "physical_printer") {
+                    this->physical_printer = kvp.second.data();
                 }
             }
     	} else if (boost::starts_with(section.first, group_name_vendor) && section.first.size() > group_name_vendor.size()) {
@@ -165,7 +182,7 @@ void Snapshot::save_ini(const std::string &path)
     // Export the common "snapshot".
 	c << std::endl << "[snapshot]" << std::endl;
 	c << "id = " << this->id << std::endl;
-	c << "time_captured = " << Slic3r::Utils::format_time_ISO8601Z(this->time_captured) << std::endl;
+	c << "time_captured = " << Slic3r::Utils::iso_utc_timestamp(this->time_captured) << std::endl;
 	c << "slic3r_version_captured = " << this->slic3r_version_captured.to_string() << std::endl;
 	c << "comment = " << this->comment << std::endl;
 	c << "reason = " << reason_string(this->reason) << std::endl;
@@ -173,10 +190,13 @@ void Snapshot::save_ini(const std::string &path)
     // Export the active presets at the time of the snapshot.
 	c << std::endl << "[presets]" << std::endl;
 	c << "print = " << this->print << std::endl;
+    c << "sla_print = " << this->sla_print << std::endl;
 	c << "filament = " << this->filaments.front() << std::endl;
 	for (size_t i = 1; i < this->filaments.size(); ++ i)
 		c << "filament_" << std::to_string(i) << " = " << this->filaments[i] << std::endl;
+    c << "sla_material = " << this->sla_material << std::endl;
 	c << "printer = " << this->printer << std::endl;
+    c << "physical_printer = " << this->physical_printer << std::endl;
 
     // Export the vendor configs.
     for (const VendorConfig &vc : this->vendor_configs) {
@@ -200,14 +220,17 @@ void Snapshot::export_selections(AppConfig &config) const
 {
     assert(filaments.size() >= 1);
     config.clear_section("presets");
-    config.set("presets", "print",    print);
-    config.set("presets", "filament", filaments.front());
-	for (int i = 1; i < filaments.size(); ++i) {
+    config.set("presets", "print",     print);
+    config.set("presets", "sla_print", sla_print);
+    config.set("presets", "filament",  filaments.front());
+    for (unsigned i = 1; i < filaments.size(); ++i) {
         char name[64];
-        sprintf(name, "filament_%d", i);
+        sprintf(name, "filament_%u", i);
         config.set("presets", name, filaments[i]);
     }
-    config.set("presets", "printer",  printer);
+    config.set("presets", "sla_material",     sla_material);
+    config.set("presets", "printer",          printer);
+    config.set("presets", "physical_printer", physical_printer);
 }
 
 void Snapshot::export_vendor_configs(AppConfig &config) const
@@ -218,8 +241,10 @@ void Snapshot::export_vendor_configs(AppConfig &config) const
     config.set_vendors(std::move(vendors));
 }
 
-// Perform a deep compare of the active print / filament / printer / vendor directories.
-// Return true if the content of the current print / filament / printer / vendor directories
+static constexpr auto snapshot_subdirs = { "print", "sla_print", "filament", "sla_material", "printer", "physical_printer", "vendor" };
+
+// Perform a deep compare of the active print / sla_print / filament / sla_material / printer / physical_printer / vendor directories.
+// Return true if the content of the current print / sla_print / filament / sla_material / printer / physical_printer / vendor directories
 // matches the state stored in this snapshot.
 bool Snapshot::equal_to_active(const AppConfig &app_config) const
 {
@@ -244,16 +269,18 @@ bool Snapshot::equal_to_active(const AppConfig &app_config) const
     // 2) Check, whether this snapshot references the same set of ini files as the current state.
     boost::filesystem::path data_dir     = boost::filesystem::path(Slic3r::data_dir());
     boost::filesystem::path snapshot_dir = boost::filesystem::path(Slic3r::data_dir()) / SLIC3R_SNAPSHOTS_DIR / this->id;
-    for (const char *subdir : { "print", "filament", "printer", "vendor" }) {
+    for (const char *subdir : snapshot_subdirs) {
         boost::filesystem::path path1 = data_dir / subdir;
         boost::filesystem::path path2 = snapshot_dir / subdir;
         std::vector<std::string> files1, files2;
-        for (auto &dir_entry : boost::filesystem::directory_iterator(path1))
-            if (boost::filesystem::is_regular_file(dir_entry.status()) && boost::algorithm::iends_with(dir_entry.path().filename().string(), ".ini"))
-                files1.emplace_back(dir_entry.path().filename().string());
-        for (auto &dir_entry : boost::filesystem::directory_iterator(path2))
-            if (boost::filesystem::is_regular_file(dir_entry.status()) && boost::algorithm::iends_with(dir_entry.path().filename().string(), ".ini"))
-                files2.emplace_back(dir_entry.path().filename().string());
+        if (boost::filesystem::is_directory(path1))
+            for (auto &dir_entry : boost::filesystem::directory_iterator(path1))
+                if (Slic3r::is_ini_file(dir_entry))
+                    files1.emplace_back(dir_entry.path().filename().string());
+        if (boost::filesystem::is_directory(path2))
+            for (auto &dir_entry : boost::filesystem::directory_iterator(path2))
+                if (Slic3r::is_ini_file(dir_entry))
+                    files2.emplace_back(dir_entry.path().filename().string());
         std::sort(files1.begin(), files1.end());
         std::sort(files2.begin(), files2.end());
         if (files1 != files2)
@@ -316,7 +343,7 @@ size_t SnapshotDB::load_db()
     // Sort the snapshots by their date/time.
     std::sort(m_snapshots.begin(), m_snapshots.end(), [](const Snapshot &s1, const Snapshot &s2) { return s1.time_captured < s2.time_captured; });
     if (! errors_cummulative.empty())
-        throw std::runtime_error(errors_cummulative);
+        throw Slic3r::RuntimeError(errors_cummulative);
     return m_snapshots.size();
 }
 
@@ -340,18 +367,19 @@ static void copy_config_dir_single_level(const boost::filesystem::path &path_src
 {
     if (! boost::filesystem::is_directory(path_dst) && 
         ! boost::filesystem::create_directory(path_dst))
-        throw std::runtime_error(std::string("Slic3r was unable to create a directory at ") + path_dst.string());
+        throw Slic3r::RuntimeError(std::string("PrusaSlicer was unable to create a directory at ") + path_dst.string());
 
-	for (auto &dir_entry : boost::filesystem::directory_iterator(path_src))
-        if (boost::filesystem::is_regular_file(dir_entry.status()) && boost::algorithm::iends_with(dir_entry.path().filename().string(), ".ini"))
-		    boost::filesystem::copy_file(dir_entry.path(), path_dst / dir_entry.path().filename(), boost::filesystem::copy_option::overwrite_if_exists);
+    for (auto &dir_entry : boost::filesystem::directory_iterator(path_src))
+        if (Slic3r::is_ini_file(dir_entry))
+            if (std::string error_message; copy_file(dir_entry.path().string(), (path_dst / dir_entry.path().filename()).string(), error_message, false) != SUCCESS)
+                throw Slic3r::RuntimeError(format("Failed copying \"%1%\" to \"%2%\": %3%", path_src.string(), path_dst.string(), error_message));
 }
 
 static void delete_existing_ini_files(const boost::filesystem::path &path)
 {
     if (! boost::filesystem::is_directory(path))
     	return;
-	for (auto &dir_entry : boost::filesystem::directory_iterator(path))
+    for (auto &dir_entry : boost::filesystem::directory_iterator(path))
         if (boost::filesystem::is_regular_file(dir_entry.status()) && boost::algorithm::iends_with(dir_entry.path().filename().string(), ".ini"))
 		    boost::filesystem::remove(dir_entry.path());
 }
@@ -365,20 +393,23 @@ const Snapshot&	SnapshotDB::take_snapshot(const AppConfig &app_config, Snapshot:
 	Snapshot snapshot;
 	// Snapshot header.
 	snapshot.time_captured 			 = Slic3r::Utils::get_current_time_utc();
-	snapshot.id 					 = Slic3r::Utils::format_time_ISO8601Z(snapshot.time_captured);
-	snapshot.slic3r_version_captured = *Semver::parse(SLIC3R_VERSION);     // XXX:  have Semver Slic3r version
+	snapshot.id 					 = Slic3r::Utils::iso_utc_timestamp(snapshot.time_captured);
+	snapshot.slic3r_version_captured = Slic3r::SEMVER;
 	snapshot.comment 				 = comment;
 	snapshot.reason 				 = reason;
 	// Active presets at the time of the snapshot.
-    snapshot.print   = app_config.get("presets", "print");
+    snapshot.print                   = app_config.get("presets", "print");
+    snapshot.sla_print               = app_config.get("presets", "sla_print");
     snapshot.filaments.emplace_back(app_config.get("presets", "filament"));
-    snapshot.printer = app_config.get("presets", "printer");
-    for (unsigned int i = 1; i < 1000; ++ i) {
+    snapshot.sla_material            = app_config.get("presets", "sla_material");
+    snapshot.printer                 = app_config.get("presets", "printer");
+    snapshot.physical_printer        = app_config.get("presets", "physical_printer");
+    for (unsigned i = 1; i < 1000; ++ i) {
         char name[64];
-        sprintf(name, "filament_%d", i);
+        sprintf(name, "filament_%u", i);
         if (! app_config.has("presets", name))
             break;
-	    snapshot.filaments.emplace_back(app_config.get("presets", name));
+        snapshot.filaments.emplace_back(app_config.get("presets", name));
     }
     // Vendor specific config bundles and installed printers.
     for (const std::pair<std::string, std::map<std::string, std::set<std::string>>> &vendor : app_config.vendors()) {
@@ -392,10 +423,10 @@ const Snapshot&	SnapshotDB::take_snapshot(const AppConfig &app_config, Snapshot:
                 ++ it;
         // Read the active config bundle, parse the config version.
         PresetBundle bundle;
-        bundle.load_configbundle((data_dir / "vendor" / (cfg.name + ".ini")).string(), PresetBundle::LOAD_CFGBUNDLE_VENDOR_ONLY);
-        for (const VendorProfile &vp : bundle.vendors)
-            if (vp.id == cfg.name)
-                cfg.version.config_version = vp.config_version;
+        bundle.load_configbundle((data_dir / "vendor" / (cfg.name + ".ini")).string(), PresetBundle::LoadConfigBundleAttribute::LoadVendorOnly, ForwardCompatibilitySubstitutionRule::EnableSilent);
+        for (const auto &vp : bundle.vendors)
+            if (vp.second.id == cfg.name)
+                cfg.version.config_version = vp.second.config_version;
         // Fill-in the min/max slic3r version from the config index, if possible.
         try {
             // Load the config index for the vendor.
@@ -412,14 +443,27 @@ const Snapshot&	SnapshotDB::take_snapshot(const AppConfig &app_config, Snapshot:
     }
 
 	boost::filesystem::path snapshot_dir = snapshot_db_dir / snapshot.id;
-	boost::filesystem::create_directory(snapshot_dir);
 
-    // Backup the presets.
-    for (const char *subdir : { "print", "filament", "printer", "vendor" })
-    	copy_config_dir_single_level(data_dir / subdir, snapshot_dir / subdir);
-	snapshot.save_ini((snapshot_dir / "snapshot.ini").string());
-    assert(m_snapshots.empty() || m_snapshots.back().time_captured <= snapshot.time_captured);
-    m_snapshots.emplace_back(std::move(snapshot));
+    try {
+	    boost::filesystem::create_directory(snapshot_dir);
+
+        // Backup the presets.
+        for (const char *subdir : snapshot_subdirs)
+    	    copy_config_dir_single_level(data_dir / subdir, snapshot_dir / subdir);
+        snapshot.save_ini((snapshot_dir / "snapshot.ini").string());
+        assert(m_snapshots.empty() || m_snapshots.back().time_captured <= snapshot.time_captured);
+        m_snapshots.emplace_back(std::move(snapshot));
+    } catch (...) {
+        if (boost::filesystem::is_directory(snapshot_dir)) {
+            try {
+                // Clean up partially copied snapshot.
+                boost::filesystem::remove_all(snapshot_dir);
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "Failed taking snapshot and failed removing the snapshot directory " << snapshot_dir;
+            }
+        }
+        throw;
+    }
     return m_snapshots.back();
 }
 
@@ -430,7 +474,7 @@ const Snapshot& SnapshotDB::restore_snapshot(const std::string &id, AppConfig &a
 			this->restore_snapshot(snapshot, app_config);
 			return snapshot;
 		}
-	throw std::runtime_error(std::string("Snapshot with id " + id + " was not found."));
+	throw Slic3r::RuntimeError(std::string("Snapshot with id " + id + " was not found."));
 }
 
 void SnapshotDB::restore_snapshot(const Snapshot &snapshot, AppConfig &app_config)
@@ -439,11 +483,14 @@ void SnapshotDB::restore_snapshot(const Snapshot &snapshot, AppConfig &app_confi
 	boost::filesystem::path snapshot_db_dir = SnapshotDB::create_db_dir();
     boost::filesystem::path snapshot_dir 	= snapshot_db_dir / snapshot.id;
     // Remove existing ini files and restore the ini files from the snapshot.
-    for (const char *subdir : { "print", "filament", "printer", "vendor" }) {
-		delete_existing_ini_files(data_dir / subdir);
-    	copy_config_dir_single_level(snapshot_dir / subdir, data_dir / subdir);
+    for (const char *subdir : snapshot_subdirs) {
+        boost::filesystem::path src = snapshot_dir / subdir;
+        boost::filesystem::path dst = data_dir / subdir;
+		delete_existing_ini_files(dst);
+        if (boost::filesystem::is_directory(src))
+    	    copy_config_dir_single_level(src, dst);
     }
-    // Update AppConfig with the selections of the print / filament / printer profiles
+    // Update AppConfig with the selections of the print / sla_print / filament / sla_material / printer profiles
     // and about the installed printer types and variants.
     snapshot.export_selections(app_config);
     snapshot.export_vendor_configs(app_config);
@@ -502,7 +549,7 @@ boost::filesystem::path SnapshotDB::create_db_dir()
         subdir.make_preferred();
         if (! boost::filesystem::is_directory(subdir) && 
             ! boost::filesystem::create_directory(subdir))
-            throw std::runtime_error(std::string("Slic3r was unable to create a directory at ") + subdir.string());
+            throw Slic3r::RuntimeError(std::string("Slic3r was unable to create a directory at ") + subdir.string());
     }
     return snapshots_dir;
 }
@@ -525,6 +572,32 @@ SnapshotDB& SnapshotDB::singleton()
 		}
 	}
 	return instance;
+}
+
+const Snapshot* take_config_snapshot_report_error(const AppConfig &app_config, Snapshot::Reason reason, const std::string &comment)
+{
+    try {
+        return &SnapshotDB::singleton().take_snapshot(app_config, reason, comment);
+    } catch (std::exception &err) {
+        show_error(static_cast<wxWindow*>(wxGetApp().mainframe), 
+            _L("Taking a configuration snapshot failed.") + "\n\n" + from_u8(err.what()));
+        return nullptr;
+    }
+}
+
+bool take_config_snapshot_cancel_on_error(const AppConfig &app_config, Snapshot::Reason reason, const std::string &comment, const std::string &message)
+{
+    try {
+        SnapshotDB::singleton().take_snapshot(app_config, reason, comment);
+        return true;
+    } catch (std::exception &err) {
+        wxRichMessageDialog dlg(static_cast<wxWindow*>(wxGetApp().mainframe),
+            _L("PrusaSlicer has encountered an error while taking a configuration snapshot.") + "\n\n" + from_u8(err.what()) + "\n\n" + from_u8(message),
+            _L("PrusaSlicer error"),
+            wxYES_NO);
+        dlg.SetYesNoLabels(_L("Continue"), _L("Abort"));
+        return dlg.ShowModal() == wxID_YES;
+    }
 }
 
 } // namespace Config

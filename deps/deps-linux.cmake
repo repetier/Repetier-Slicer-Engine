@@ -3,14 +3,21 @@ set(DEP_CMAKE_OPTS "-DCMAKE_POSITION_INDEPENDENT_CODE=ON")
 
 include("deps-unix-common.cmake")
 
+# Some Linuxes may have very old libpng, so it's best to bundle it instead of relying on the system version.
+# find_package(PNG QUIET)
+# if (NOT PNG_FOUND)
+#     message(WARNING "No PNG dev package found in system, building static library. You should install the system package.")
+# endif ()
+
+#TODO UDEV
 
 ExternalProject_Add(dep_boost
     EXCLUDE_FROM_ALL 1
-    URL "https://dl.bintray.com/boostorg/release/1.66.0/source/boost_1_66_0.tar.gz"
-    URL_HASH SHA256=bd0df411efd9a585e5a2212275f8762079fed8842264954675a4fddc46cfcf60
+    URL "https://dl.bintray.com/boostorg/release/1.70.0/source/boost_1_70_0.tar.gz"
+    URL_HASH SHA256=882b48708d211a5f48e60b0124cf5863c1534cd544ecd0664bb534a4b5d506e9
     BUILD_IN_SOURCE 1
     CONFIGURE_COMMAND ./bootstrap.sh
-        --with-libraries=system,filesystem,thread,log,locale,regex
+        --with-libraries=system,iostreams,filesystem,thread,log,locale,regex
         "--prefix=${DESTDIR}/usr/local"
     BUILD_COMMAND ./b2
         -j ${NPROC}
@@ -25,26 +32,14 @@ ExternalProject_Add(dep_boost
     INSTALL_COMMAND ""   # b2 does that already
 )
 
-ExternalProject_Add(dep_libpng
-    EXCLUDE_FROM_ALL 1
-    URL "https://github.com/glennrp/libpng/archive/v1.6.36.tar.gz"
-    URL_HASH SHA256=5bef5a850a9255365a2dc344671b7e9ef810de491bd479c2506ac3c337e2d84f
-    CMAKE_GENERATOR "${DEP_MSVC_GEN}"
-    CMAKE_ARGS
-        -DPNG_SHARED=OFF
-        -DPNG_TESTS=OFF
-        ${DEP_CMAKE_OPTS}
-    INSTALL_COMMAND make install "DESTDIR=${DESTDIR}"
-    INSTALL_COMMAND ""
-)
-
 ExternalProject_Add(dep_libopenssl
     EXCLUDE_FROM_ALL 1
-    URL "https://github.com/openssl/openssl/archive/OpenSSL_1_1_0g.tar.gz"
-    URL_HASH SHA256=8e9516b8635bb9113c51a7b5b27f9027692a56b104e75b709e588c3ffd6a0422
+    URL "https://github.com/openssl/openssl/archive/OpenSSL_1_1_0l.tar.gz"
+    URL_HASH SHA256=e2acf0cf58d9bff2b42f2dc0aee79340c8ffe2c5e45d3ca4533dd5d4f5775b1d
     BUILD_IN_SOURCE 1
     CONFIGURE_COMMAND ./config
         "--prefix=${DESTDIR}/usr/local"
+        "--libdir=lib"
         no-shared
         no-ssl3-method
         no-dynamic-engine
@@ -55,7 +50,7 @@ ExternalProject_Add(dep_libopenssl
 
 ExternalProject_Add(dep_libcurl
     EXCLUDE_FROM_ALL 1
-   DEPENDS dep_libopenssl
+    DEPENDS dep_libopenssl
     URL "https://curl.haxx.se/download/curl-7.58.0.tar.gz"
     URL_HASH SHA256=cc245bf9a1a42a45df491501d97d5593392a03f7b4f07b952793518d97666115
     BUILD_IN_SOURCE 1
@@ -68,7 +63,12 @@ ExternalProject_Add(dep_libcurl
         --enable-versioned-symbols
         --enable-threaded-resolver
         --with-random=/dev/urandom
-        --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt
+        
+        # CA root certificate paths will be set for openssl at runtime.
+        --without-ca-bundle
+        --without-ca-path
+        --with-ca-fallback # to look for the ssl backend's ca store
+
         --disable-ldap
         --disable-ldaps
         --disable-manual
@@ -80,7 +80,6 @@ ExternalProject_Add(dep_libcurl
         --disable-smb
         --disable-smtp
         --disable-gopher
-        --disable-crypto-auth
         --without-gssapi
         --without-libpsl
         --without-libidn2
@@ -101,39 +100,4 @@ ExternalProject_Add(dep_libcurl
     INSTALL_COMMAND make install "DESTDIR=${DESTDIR}"
 )
 
-if (DEP_WX_STABLE)
-    set(DEP_WX_URL "https://github.com/wxWidgets/wxWidgets/releases/download/v3.0.4/wxWidgets-3.0.4.tar.bz2")
-    set(DEP_WX_HASH "SHA256=96157f988d261b7368e5340afa1a0cad943768f35929c22841f62c25b17bf7f0")
-else ()
-    set(DEP_WX_URL "https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.1/wxWidgets-3.1.1.tar.bz2")
-    set(DEP_WX_HASH "SHA256=c925dfe17e8f8b09eb7ea9bfdcfcc13696a3e14e92750effd839f5e10726159e")
-endif()
-
-ExternalProject_Add(dep_wxwidgets
-    EXCLUDE_FROM_ALL 1
-    URL "${DEP_WX_URL}"
-    URL_HASH "${DEP_WX_HASH}"
-    BUILD_IN_SOURCE 1
-    PATCH_COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/wxwidgets-pngprefix.h" src/png/pngprefix.h
-    CONFIGURE_COMMAND ./configure
-        "--prefix=${DESTDIR}/usr/local"
-        --disable-shared
-        --with-gtk=2
-        --with-opengl
-        --enable-unicode
-        --enable-graphics_ctx
-        --with-regex=builtin
-        --with-libpng=builtin
-        --with-libxpm=builtin
-        --with-libjpeg=builtin
-        --with-libtiff=builtin
-        --with-zlib=builtin
-        --with-expat=builtin
-        --disable-precomp-headers
-        --enable-debug_info
-        --enable-debug_gdb
-        --disable-debug
-        --disable-debug_flag
-    BUILD_COMMAND make "-j${NPROC}" && make -C locale allmo
-    INSTALL_COMMAND make install
-)
+add_dependencies(dep_openvdb dep_boost)

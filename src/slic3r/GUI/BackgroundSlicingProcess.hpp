@@ -4,17 +4,21 @@
 #include <string>
 #include <condition_variable>
 #include <mutex>
-#include <thread>
 
 #include <wx/event.h>
 
-#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
+#include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/Format/SL1.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+
+
+namespace boost { namespace filesystem { class path; } }
 
 namespace Slic3r {
 
 class DynamicPrintConfig;
-class GCodePreviewData;
 class Model;
 class SLAPrint;
 
@@ -26,6 +30,39 @@ public:
 	virtual wxEvent *Clone() const { return new SlicingStatusEvent(*this); }
 
 	PrintBase::SlicingStatus status;
+};
+
+class SlicingProcessCompletedEvent : public wxEvent
+{
+public:
+	enum StatusType {
+		Finished,
+		Cancelled,
+		Error
+	};
+
+	SlicingProcessCompletedEvent(wxEventType eventType, int winid, StatusType status, std::exception_ptr exception) :
+		wxEvent(winid, eventType), m_status(status), m_exception(exception) {}
+	virtual wxEvent* Clone() const { return new SlicingProcessCompletedEvent(*this); }
+
+	StatusType 	status()    const { return m_status; }
+	bool 		finished()  const { return m_status == Finished; }
+	bool 		success()   const { return m_status == Finished; }
+	bool 		cancelled() const { return m_status == Cancelled; }
+	bool		error() 	const { return m_status == Error; }
+	// Unhandled error produced by stdlib or a Win32 structured exception, or unhandled Slic3r's own critical exception.
+	bool 		critical_error() const;
+	// Critical errors does invalidate plater except CopyFileError.
+	bool        invalidate_plater() const;
+	// Only valid if error()
+	void 		rethrow_exception() const { assert(this->error()); assert(m_exception); std::rethrow_exception(m_exception); }
+	// Produce a human readable message to be displayed by a notification or a message box.
+	// 2nd parameter defines whether the output should be displayed with a monospace font.
+	std::pair<std::string, bool> format_error_message() const;
+
+private:
+	StatusType 			m_status;
+	std::exception_ptr 	m_exception;
 };
 
 wxDEFINE_EVENT(EVT_SLICING_UPDATE, SlicingStatusEvent);
@@ -45,15 +82,21 @@ public:
 	~BackgroundSlicingProcess();
 
 	void set_fff_print(Print *print) { m_fff_print = print; }
-	void set_sla_print(SLAPrint *print) { m_sla_print = print; }
-	void set_gcode_preview_data(GCodePreviewData *gpd) { m_gcode_preview_data = gpd; }
-	// The following wxCommandEvent will be sent to the UI thread / Platter window, when the slicing is finished
+    void set_sla_print(SLAPrint *print) { m_sla_print = print; m_sla_print->set_printer(&m_sla_archive); }
+	void set_thumbnail_cb(ThumbnailsGeneratorCallback cb) { m_thumbnail_cb = cb; }
+	void set_gcode_result(GCodeProcessor::Result* result) { m_gcode_result = result; }
+
+	// The following wxCommandEvent will be sent to the UI thread / Plater window, when the slicing is finished
 	// and the background processing will transition into G-code export.
 	// The wxCommandEvent is sent to the UI thread asynchronously without waiting for the event to be processed.
 	void set_slicing_completed_event(int event_id) { m_event_slicing_completed_id = event_id; }
-	// The following wxCommandEvent will be sent to the UI thread / Platter window, when the G-code export is finished.
+	// The following wxCommandEvent will be sent to the UI thread / Plater window, when the G-code export is finished.
 	// The wxCommandEvent is sent to the UI thread asynchronously without waiting for the event to be processed.
 	void set_finished_event(int event_id) { m_event_finished_id = event_id; }
+	// The following wxCommandEvent will be sent to the UI thread / Plater window, when the G-code is being exported to
+	// specified path or uploaded.
+	// The wxCommandEvent is sent to the UI thread asynchronously without waiting for the event to be processed.
+	void set_export_began_event(int event_id) { m_event_export_began_id = event_id; }
 
 	// Activate either m_fff_print or m_sla_print.
 	// Return true if changed.
@@ -65,6 +108,9 @@ public:
 	const PrintBase*    current_print() const { return m_print; }
 	const Print* 		fff_print() const { return m_fff_print; }
 	const SLAPrint* 	sla_print() const { return m_sla_print; }
+    // Take the project path (if provided), extract the name of the project, run it through the macro processor and save it next to the project file.
+    // If the project_path is empty, just run output_filepath().
+	std::string 		output_filepath_for_project(const boost::filesystem::path &project_path);
 
 	// Start the background processing. Returns false if the background processing was already running.
 	bool start();
@@ -77,7 +123,10 @@ public:
 
 	// Apply config over the print. Returns false, if the new config values caused any of the already
 	// processed steps to be invalidated, therefore the task will need to be restarted.
-	Print::ApplyStatus apply(const Model &model, const DynamicPrintConfig &config);
+    PrintBase::ApplyStatus apply(const Model &model, const DynamicPrintConfig &config);
+	// After calling the apply() function, set_task() may be called to limit the task to be processed by process().
+	// This is useful for calculating SLA supports for a single object only.
+	void 		set_task(const PrintBase::TaskParams &params);
 	// After calling apply, the empty() call will report whether there is anything to slice.
 	bool 		empty() const;
 	// Validate the print. Returns an empty string if valid, returns an error message if invalid.
@@ -86,7 +135,7 @@ public:
 
 	// Set the export path of the G-code.
 	// Once the path is set, the G-code 
-	void schedule_export(const std::string &path);
+	void schedule_export(const std::string &path, bool export_path_on_removable_media);
 	// Set print host upload job data to be enqueued to the PrintHostJobQueue
 	// after current print slicing is complete
 	void schedule_upload(Slic3r::PrintHostJob upload_job);
@@ -94,6 +143,7 @@ public:
 	void reset_export();
 	// Once the G-code export is scheduled, the apply() methods will do nothing.
 	bool is_export_scheduled() const { return ! m_export_path.empty(); }
+	bool is_upload_scheduled() const { return ! m_upload_job.empty(); }
 
 	enum State {
 		// m_thread  is not running yet, or it did not reach the STATE_IDLE yet (it does not wait on the condition yet).
@@ -119,7 +169,7 @@ public:
     // This "finished" flag does not account for the final export of the output file (.gcode or zipped PNGs),
     // and it does not account for the OctoPrint scheduling.
     bool    finished() const { return m_print->finished(); }
-
+    
 private:
 	void 	thread_proc();
 	void 	thread_proc_safe();
@@ -141,18 +191,22 @@ private:
 	Print 					   *m_fff_print 		 = nullptr;
 	SLAPrint 				   *m_sla_print			 = nullptr;
 	// Data structure, to which the G-code export writes its annotations.
-	GCodePreviewData 		   *m_gcode_preview_data = nullptr;
-	// Temporary G-code, there is one defined for the BackgroundSlicingProcess, differentiated from the other processes by a process ID.
+	GCodeProcessor::Result     *m_gcode_result = nullptr;
+	// Callback function, used to write thumbnails into gcode.
+	ThumbnailsGeneratorCallback m_thumbnail_cb = nullptr;
+	SL1Archive                  m_sla_archive;
+		// Temporary G-code, there is one defined for the BackgroundSlicingProcess, differentiated from the other processes by a process ID.
 	std::string 				m_temp_output_path;
 	// Output path provided by the user. The output path may be set even if the slicing is running,
 	// but once set, it cannot be re-set.
 	std::string 				m_export_path;
+	bool 						m_export_path_on_removable_media = false;
 	// Print host upload job to schedule after slicing is complete, used by schedule_upload(),
 	// empty by default (ie. no upload to schedule)
 	PrintHostJob                m_upload_job;
 	// Thread, on which the background processing is executed. The thread will always be present
 	// and ready to execute the slicing process.
-	std::thread		 			m_thread;
+	boost::thread		 		m_thread;
 	// Mutex and condition variable to synchronize m_thread with the UI thread.
 	std::mutex 		 			m_mutex;
 	std::condition_variable		m_condition;
@@ -169,10 +223,13 @@ private:
     void                throw_if_canceled() const { if (m_print->canceled()) throw CanceledException(); }
     void                prepare_upload();
 
-	// wxWidgets command ID to be sent to the platter to inform that the slicing is finished, and the G-code export will continue.
+	// wxWidgets command ID to be sent to the plater to inform that the slicing is finished, and the G-code export will continue.
 	int 						m_event_slicing_completed_id 	= 0;
-	// wxWidgets command ID to be sent to the platter to inform that the task finished.
+	// wxWidgets command ID to be sent to the plater to inform that the task finished.
 	int 						m_event_finished_id  			= 0;
+	// wxWidgets command ID to be sent to the plater to inform that the G-code is being exported.
+	int                         m_event_export_began_id         = 0;
+
 };
 
 }; // namespace Slic3r

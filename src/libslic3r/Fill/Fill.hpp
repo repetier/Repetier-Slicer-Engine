@@ -6,7 +6,6 @@
 #include <stdint.h>
 
 #include "../libslic3r.h"
-#include "../BoundingBox.hpp"
 #include "../PrintConfig.hpp"
 
 #include "FillBase.hpp"
@@ -20,16 +19,14 @@ class LayerRegion;
 class Filler
 {
 public:
-    Filler() : fill(NULL) {}
+    Filler() : fill(nullptr) {}
     ~Filler() { 
         delete fill; 
-        fill = NULL;
+        fill = nullptr;
     }
     Fill        *fill;
     FillParams   params;
 };
-
-void make_fill(LayerRegion &layerm, ExtrusionEntityCollection &out);
 
 } // namespace Slic3r
 

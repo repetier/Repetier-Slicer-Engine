@@ -7,8 +7,12 @@ if (WIN32)
 else()
     set(ENV_PATH_SEPARATOR ":")
 endif()
-set(ENV{PATH}     "${PROJECT_SOURCE_DIR}/local-lib/bin${ENV_PATH_SEPARATOR}$ENV{PATH}")
-set(PERL_INCLUDE  "${PROJECT_SOURCE_DIR}/local-lib/lib/perl5${ENV_PATH_SEPARATOR}$ENV{PERL5LIB}")
+
+# Install the XS.pm and XS.{so,dll,bundle} into the local-lib directory.
+set(PERL_LOCAL_LIB_DIR ${PROJECT_SOURCE_DIR}/../local-lib)
+
+set(ENV{PATH}     "${PERL_LOCAL_LIB_DIR}/bin${ENV_PATH_SEPARATOR}$ENV{PATH}")
+set(PERL_INCLUDE  "${PERL_LOCAL_LIB_DIR}/lib/perl5${ENV_PATH_SEPARATOR}$ENV{PERL5LIB}")
 message("PATH: $ENV{PATH}")
 message("PERL_INCLUDE: ${PERL_INCLUDE}")
 find_package(Perl REQUIRED)
@@ -58,7 +62,6 @@ set(XS_XSP_FILES
     ${XSP_DIR}/Layer.xsp
     ${XSP_DIR}/Line.xsp
     ${XSP_DIR}/Model.xsp
-    ${XSP_DIR}/MotionPlanner.xsp
     ${XSP_DIR}/PerimeterGenerator.xsp
     ${XSP_DIR}/PlaceholderParser.xsp
     ${XSP_DIR}/Point.xsp
@@ -119,8 +122,6 @@ target_include_directories(XS PRIVATE src ${LIBDIR}/libslic3r)
 target_compile_definitions(XS PRIVATE -DSLIC3RXS)
 set_target_properties(XS PROPERTIES PREFIX "") # Prevent cmake from generating libXS.so instead of XS.so
 
-target_link_libraries(XS ${Boost_LIBRARIES})
-
 if (APPLE)
     # -liconv: boost links to libiconv by default
     target_link_libraries(XS "-liconv -framework IOKit" "-framework CoreFoundation" -lc++)
@@ -156,33 +157,23 @@ if (WIN32)
     target_link_libraries(XS ${PERL_LIBRARY})
 endif()
 
-target_link_libraries(XS ${Boost_LIBRARIES})
-target_link_libraries(XS ${TBB_LIBRARIES})
-# target_link_libraries(XS ${wxWidgets_LIBRARIES})
-target_link_libraries(XS ${EXPAT_LIBRARIES})
-# target_link_libraries(XS ${GLEW_LIBRARIES})
 
-# Install the XS.pm and XS.{so,dll,bundle} into the local-lib directory.
-set(PERL_LOCAL_LIB_DIR "../../local-lib/lib/perl5/${PerlEmbed_ARCHNAME}")
+set(PERL_LOCAL_LIB_ARCH_DIR "${PERL_LOCAL_LIB_DIR}/lib/perl5/${PerlEmbed_ARCHNAME}")
 add_custom_command(
     TARGET XS
     POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${PERL_LOCAL_LIB_DIR}/auto/Slic3r/XS/"
-        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:XS>" "${PERL_LOCAL_LIB_DIR}/auto/Slic3r/XS/"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${PERL_LOCAL_LIB_DIR}/Slic3r/"
-        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/lib/Slic3r/XS.pm" "${PERL_LOCAL_LIB_DIR}/Slic3r/"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PERL_LOCAL_LIB_ARCH_DIR}/auto/Slic3r/XS/"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:XS>" "${PERL_LOCAL_LIB_ARCH_DIR}/auto/Slic3r/XS/"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PERL_LOCAL_LIB_ARCH_DIR}/Slic3r/"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/lib/Slic3r/XS.pm" "${PERL_LOCAL_LIB_ARCH_DIR}/Slic3r/"
     COMMENT "Installing XS.pm and XS.{so,dll,bundle} into the local-lib directory ..."
 )
 if(APPLE)
     add_custom_command(
         TARGET XS
         POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E rename "${PERL_LOCAL_LIB_DIR}/auto/Slic3r/XS/XS" "${PERL_LOCAL_LIB_DIR}/auto/Slic3r/XS/XS.bundle"
+            COMMAND ${CMAKE_COMMAND} -E rename "${PERL_LOCAL_LIB_ARCH_DIR}/auto/Slic3r/XS/XS" "${PERL_LOCAL_LIB_ARCH_DIR}/auto/Slic3r/XS/XS.bundle"
     )
-endif()
-
-if(SLIC3R_PROFILE)
-    target_link_libraries(Shiny)
 endif()
 
 if (MSVC)
@@ -193,6 +184,16 @@ if (MSVC)
     string(REPLACE "/" "\\" PROPS_CMAKE_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
     configure_file("../cmake/msvc/xs.wperl.props.in" "${CMAKE_BINARY_DIR}/xs.wperl.props" NEWLINE_STYLE CRLF)
     set_target_properties(XS PROPERTIES VS_USER_PROPS "${CMAKE_BINARY_DIR}/xs.wperl.props")
+
+    if ("${CMAKE_SIZEOF_VOID_P}" STREQUAL "8")
+        set(_bits 64)
+    elseif ("${CMAKE_SIZEOF_VOID_P}" STREQUAL "4")
+        set(_bits 32)
+    endif ()
+    add_custom_command(TARGET XS POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy ${TOP_LEVEL_PROJECT_DIR}/deps/GMP/gmp/lib/win${_bits}/libgmp-10.dll "${PERL_LOCAL_LIB_ARCH_DIR}/auto/Slic3r/XS/"
+        COMMENT "Installing gmp runtime into the local-lib directory ..."
+        VERBATIM)
 endif()
 
 # Installation
@@ -207,5 +208,5 @@ if (MSVC)
 else ()
     set(PERL_PROVE "${PERL_BIN_PATH}/prove")
 endif ()
-add_test (NAME xs COMMAND "${PERL_EXECUTABLE}" ${PERL_PROVE} -I ${PROJECT_SOURCE_DIR}/../local-lib/lib/perl5 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+add_test (NAME xs COMMAND "${PERL_EXECUTABLE}" ${PERL_PROVE} -I ${PERL_LOCAL_LIB_DIR}/lib/perl5 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 add_test (NAME integration COMMAND "${PERL_EXECUTABLE}" ${PERL_PROVE} WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/..)

@@ -1,195 +1,343 @@
+#include "libslic3r/libslic3r.h"
 #include "KBShortcutsDialog.hpp"
 #include "I18N.hpp"
 #include "libslic3r/Utils.hpp"
 #include "GUI.hpp"
 #include <wx/scrolwin.h>
+#include <wx/display.h>
 #include "GUI_App.hpp"
+#include "wxExtensions.hpp"
+#include "MainFrame.hpp"
+#include <wx/notebook.h>
 
-namespace Slic3r { 
+namespace Slic3r {
 namespace GUI {
 
 KBShortcutsDialog::KBShortcutsDialog()
-    : wxDialog(NULL, wxID_ANY, _(L("Slic3r Prusa Edition - Keyboard Shortcuts")), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER)
+    : DPIDialog(static_cast<wxWindow*>(wxGetApp().mainframe), wxID_ANY, wxString(wxGetApp().is_editor() ? SLIC3R_APP_NAME : GCODEVIEWER_APP_NAME) + " - " + _L("Keyboard Shortcuts"),
+    wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
 {
-	SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));    
-
-	auto main_sizer = new wxBoxSizer(wxVERTICAL);
-
-    // logo
-	wxBitmap logo_bmp = wxBitmap(from_u8(Slic3r::var("Slic3r_32px.png")), wxBITMAP_TYPE_PNG);
+    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
 
     // fonts
-    wxFont head_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).Bold();
-#ifdef __WXOSX__
-    head_font.SetPointSize(14);
-#else
-    head_font.SetPointSize(12);
-#endif // __WXOSX__
-
-    const wxFont& font = wxGetApp().small_font();
+    const wxFont& font = wxGetApp().normal_font();
     const wxFont& bold_font = wxGetApp().bold_font();
+    SetFont(font);
+
+    auto main_sizer = new wxBoxSizer(wxVERTICAL);
+
+    main_sizer->Add(create_header(this, bold_font), 0, wxEXPAND | wxALL, 10);
+
+    wxNotebook* book = new wxNotebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNB_TOP);
+    main_sizer->Add(book, 1, wxEXPAND | wxALL, 10);
 
     fill_shortcuts();
-
-    auto panel = new wxPanel(this);
-    auto main_grid_sizer = new wxFlexGridSizer(2, 10, 10);
-    panel->SetSizer(main_grid_sizer);
-    main_sizer->Add(panel, 1, wxEXPAND | wxALL, 0);
-
-    wxBoxSizer* l_sizer = new wxBoxSizer(wxVERTICAL);
-    main_grid_sizer->Add(l_sizer, 0);
-
-    wxBoxSizer* r_sizer = new wxBoxSizer(wxVERTICAL);
-    main_grid_sizer->Add(r_sizer, 0);
-
-    for (auto& sc : m_full_shortcuts)
-    {
-//         auto sizer = sc.first == _(L("Main Shortcuts")) ? l_sizer : r_sizer;
-        auto sizer = sc.second.second == 0 ? l_sizer : r_sizer;
-        wxBoxSizer* hsizer = new wxBoxSizer(wxHORIZONTAL);
-        sizer->Add(hsizer, 0, wxEXPAND | wxTOP | wxBOTTOM, 10);
-
-        // logo
-        auto *logo = new wxStaticBitmap(panel, wxID_ANY, logo_bmp);
-        hsizer->Add(logo, 0, wxEXPAND | wxLEFT | wxRIGHT, 15);
-
-        // head
-        wxStaticText* head = new wxStaticText(panel, wxID_ANY, sc.first, wxDefaultPosition, wxSize(200,-1));
-        head->SetFont(head_font);
-        hsizer->Add(head, 0, wxALIGN_CENTER_VERTICAL);
-
-        // Shortcuts list
-        auto grid_sizer = new wxFlexGridSizer(2, 5, 15);
-        sizer->Add(grid_sizer, 0, wxEXPAND | wxLEFT| wxRIGHT, 15);
-
-        for (auto pair : sc.second.first)
-        {
-            auto shortcut = new wxStaticText(panel, wxID_ANY, _(pair.first));
-            shortcut->SetFont(bold_font);
-            grid_sizer->Add(shortcut, -1, wxALIGN_CENTRE_VERTICAL);
-
-            auto description = new wxStaticText(panel, wxID_ANY, _(pair.second));
-            description->SetFont(font);
-            grid_sizer->Add(description, -1, wxALIGN_CENTRE_VERTICAL);
-        }
+    for (size_t i = 0; i < m_full_shortcuts.size(); ++i) {
+        wxPanel* page = create_page(book, m_full_shortcuts[i], font, bold_font);
+        m_pages.push_back(page);
+        book->AddPage(page, m_full_shortcuts[i].first.first, i == 0);
     }
-  
+
     wxStdDialogButtonSizer* buttons = this->CreateStdDialogButtonSizer(wxOK);
-
     this->SetEscapeId(wxID_OK);
-    this->Bind(wxEVT_BUTTON, &KBShortcutsDialog::onCloseDialog, this, wxID_OK);
-    main_sizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, 15);
-    
-    this->Bind(wxEVT_LEFT_DOWN, &KBShortcutsDialog::onCloseDialog, this);
+    main_sizer->Add(buttons, 0, wxEXPAND | wxALL, 5);
 
-	SetSizer(main_sizer);
-	main_sizer->SetSizeHints(this);
+    SetSizer(main_sizer);
+    main_sizer->SetSizeHints(this);
+    this->CenterOnParent();
+}
+
+void KBShortcutsDialog::on_dpi_changed(const wxRect& suggested_rect)
+{
+    m_logo_bmp.msw_rescale();
+    m_header_bitmap->SetBitmap(m_logo_bmp.bmp());
+    msw_buttons_rescale(this, em_unit(), { wxID_OK });
+
+    Layout();
+    Fit();
+    Refresh();
 }
 
 void KBShortcutsDialog::fill_shortcuts()
 {
-#ifdef __WXOSX__
-    const std::string ctrl = "⌘";
-    const std::string alt = "⌥";
+    const std::string& ctrl = GUI::shortkey_ctrl_prefix();
+    const std::string& alt = GUI::shortkey_alt_prefix();
+
+    if (wxGetApp().is_editor()) {
+        Shortcuts commands_shortcuts = {
+            // File
+            { ctrl + "N", L("New project, clear plater") },
+            { ctrl + "O", L("Open project STL/OBJ/AMF/3MF with config, clear plater") },
+            { ctrl + "S", L("Save project (3mf)") },
+            { ctrl + alt + "S", L("Save project as (3mf)") },
+            { ctrl + "R", L("(Re)slice") },
+            // File>Import
+            { ctrl + "I", L("Import STL/OBJ/AMF/3MF without config, keep plater") },
+            { ctrl + "L", L("Import Config from ini/amf/3mf/gcode") },
+            { ctrl + alt + "L", L("Load Config from ini/amf/3mf/gcode and merge") },
+            // File>Export
+            { ctrl + "G", L("Export G-code") },
+            { ctrl + "Shift+" + "G", L("Send G-code") },
+            { ctrl + "E", L("Export config") },
+            { ctrl + "U", L("Export to SD card / Flash drive") },
+            { ctrl + "T", L("Eject SD card / Flash drive") },
+            // Edit
+            { ctrl + "A", L("Select all objects") },
+            { "Esc", L("Deselect all") },
+            { "Del", L("Delete selected") },
+            { ctrl + "Del", L("Delete all") },
+            { ctrl + "Z", L("Undo") },
+            { ctrl + "Y", L("Redo") },
+            { ctrl + "C", L("Copy to clipboard") },
+            { ctrl + "V", L("Paste from clipboard") },
+#ifdef __APPLE__
+            { ctrl + "Shift+" + "R", L("Reload plater from disk") },
 #else
-    const std::string ctrl = "Ctrl+";
-    const std::string alt = "Alt+";
-#endif // __WXOSX__
+            { "F5", L("Reload plater from disk") },
+#endif // __APPLE__
+            { ctrl + "F", L("Search") },
+            // Window
+            { ctrl + "1", L("Select Plater Tab") },
+            { ctrl + "2", L("Select Print Settings Tab") },
+            { ctrl + "3", L("Select Filament Settings Tab") },
+            { ctrl + "4", L("Select Printer Settings Tab") },
+            { ctrl + "5", L("Switch to 3D") },
+            { ctrl + "6", L("Switch to Preview") },
+            { ctrl + "J", L("Print host upload queue") },
+            { ctrl + "Shift+" + "I", L("Open new instance") },
+            // View
+            { "0-6", L("Camera view") },
+            { "E", L("Show/Hide object/instance labels") },
+            // Configuration
+            { ctrl + "P", L("Preferences") },
+            // Help
+            { "?", L("Show keyboard shortcuts list") }
+        };
 
-    m_full_shortcuts.reserve(4);
+        m_full_shortcuts.push_back({ { _L("Commands"), "" }, commands_shortcuts });
 
-    Shortcuts main_shortcuts;
-    main_shortcuts.reserve(25);
+        Shortcuts plater_shortcuts = {
+            { "A", L("Arrange") },
+            { "Shift+A", L("Arrange selection") },
+            { "+", L("Add Instance of the selected object") },
+            { "-", L("Remove Instance of the selected object") },
+            { ctrl, L("Press to select multiple objects\nor move multiple objects with mouse") },
+            { "Shift+", L("Press to activate selection rectangle") },
+            { alt, L("Press to activate deselection rectangle") },
+            { L("Arrow Up"), L("Move selection 10 mm in positive Y direction") },
+            { L("Arrow Down"), L("Move selection 10 mm in negative Y direction") },
+            { L("Arrow Left"), L("Move selection 10 mm in negative X direction") },
+            { L("Arrow Right"), L("Move selection 10 mm in positive X direction") },
+            { std::string("Shift+") + L("Any arrow"), L("Movement step set to 1 mm") },
+            { ctrl + L("Any arrow"), L("Movement in camera space") },
+            { L("Page Up"), L("Rotate selection 45 degrees CCW") },
+            { L("Page Down"), L("Rotate selection 45 degrees CW") },
+            { "M", L("Gizmo move") },
+            { "S", L("Gizmo scale") },
+            { "R", L("Gizmo rotate") },
+            { "C", L("Gizmo cut") },
+            { "F", L("Gizmo Place face on bed") },
+            { "H", L("Gizmo SLA hollow") },
+            { "L", L("Gizmo SLA support points") },
+            { "Esc", L("Unselect gizmo or clear selection") },
+            { "K", L("Change camera type (perspective, orthographic)") },
+            { "B", L("Zoom to Bed") },
+            { "Z", L("Zoom to selected object\nor all objects in scene, if none selected") },
+            { "I", L("Zoom in") },
+            { "O", L("Zoom out") },
+            { "Tab", L("Switch between Editor/Preview") },
+            { "Shift+Tab", L("Collapse/Expand the sidebar") },
+#if ENABLE_CTRL_M_ON_WINDOWS
+#ifdef _WIN32
+            { ctrl + "M", L("Show/Hide 3Dconnexion devices settings dialog, if enabled") },
+#else
+            { ctrl + "M", L("Show/Hide 3Dconnexion devices settings dialog") },
+#endif // _WIN32
+#else
+#if defined(__linux__) || defined(__APPLE__)
+            { ctrl + "M", L("Show/Hide 3Dconnexion devices settings dialog") },
+#endif // __linux__
+#endif // ENABLE_CTRL_M_ON_WINDOWS
+#if ENABLE_RENDER_PICKING_PASS
+            // Don't localize debugging texts.
+            { "P", "Toggle picking pass texture rendering on/off" },
+#endif // ENABLE_RENDER_PICKING_PASS
+        };
 
-    main_shortcuts.push_back(Shortcut(ctrl+"O"          ,L("Open project STL/OBJ/AMF/3MF with config, delete bed")));
-    main_shortcuts.push_back(Shortcut(ctrl+"I"          ,L("Import STL/OBJ/AMF/3MF without config, keep bed")));
-    main_shortcuts.push_back(Shortcut(ctrl+"L"          ,L("Load Config from .ini/amf/3mf/gcode")));
-    main_shortcuts.push_back(Shortcut(ctrl+"G"          ,L("Export G-code")));
-    main_shortcuts.push_back(Shortcut(ctrl+"S"          ,L("Save project (3MF)")));
-    main_shortcuts.push_back(Shortcut(ctrl+alt+"L"      ,L("Load Config from .ini/amf/3mf/gcode and merge")));
-    main_shortcuts.push_back(Shortcut(ctrl+"R"          ,L("(Re)slice")));
-    main_shortcuts.push_back(Shortcut(ctrl+"U"          ,L("Quick slice")));
-    main_shortcuts.push_back(Shortcut(ctrl+"Shift+U"    ,L("Repeat last quick slice")));
-    main_shortcuts.push_back(Shortcut(ctrl+"1"          ,L("Select Plater Tab")));
-    main_shortcuts.push_back(Shortcut(ctrl+alt+"U"      ,L("Quick slice and Save as")));
-    main_shortcuts.push_back(Shortcut(ctrl+"2"          ,L("Select Print Settings Tab")));
-    main_shortcuts.push_back(Shortcut(ctrl+"3"          ,L("Select Filament Settings Tab")));
-    main_shortcuts.push_back(Shortcut(ctrl+"4"          ,L("Select Printer Settings Tab")));
-    main_shortcuts.push_back(Shortcut(ctrl+"5"          ,L("Switch to 3D")));
-    main_shortcuts.push_back(Shortcut(ctrl+"6"          ,L("Switch to Preview")));
-    main_shortcuts.push_back(Shortcut(ctrl+"P"          ,L("Preferences")));
-    main_shortcuts.push_back(Shortcut(ctrl+"J"          ,L("Print host upload queue")));
-    main_shortcuts.push_back(Shortcut("0-6"             ,L("Camera view ")));
-    main_shortcuts.push_back(Shortcut("+"               ,L("Add Instance to selected object ")));
-    main_shortcuts.push_back(Shortcut("-"               ,L("Remove Instance from selected object")));
-    main_shortcuts.push_back(Shortcut("?"               ,L("Show keyboard shortcuts list")));
-    main_shortcuts.push_back(Shortcut("Shift+LeftMouse", L("Select multiple object/Move multiple object")));
+        m_full_shortcuts.push_back({ { _L("Plater"), "" }, plater_shortcuts });
 
-    m_full_shortcuts.push_back(std::make_pair( _(L("Main Shortcuts")), std::make_pair(main_shortcuts, 0) ));
+        Shortcuts gizmos_shortcuts = {
+            { ctrl, L("All gizmos: Rotate - left mouse button; Pan - right mouse button") },
+            { "Shift+", L("Gizmo move: Press to snap by 1mm") },
+            { "Shift+", L("Gizmo scale: Press to snap by 5%") },
+            { "F", L("Gizmo scale: Scale selection to fit print volume") },
+            { ctrl, L("Gizmo scale: Press to activate one direction scaling") },
+            { alt, L("Gizmo scale: Press to scale selected objects around their own center") },
+            { alt, L("Gizmo rotate: Press to rotate selected objects around their own center") },
+        };
 
+        m_full_shortcuts.push_back({ { _L("Gizmos"), _L("The following shortcuts are applicable when the specified gizmo is active") }, gizmos_shortcuts });
+    }
+    else {
+        Shortcuts commands_shortcuts = {
+            { ctrl + "O", L("Open a G-code file") },
+#ifdef __APPLE__
+            { ctrl + "Shift+" + "R", L("Reload the plater from disk") },
+#else
+            { "F5", L("Reload plater from disk") },
+#endif // __APPLE__
+        };
 
-    Shortcuts plater_shortcuts;
-    plater_shortcuts.reserve(20);
+        m_full_shortcuts.push_back({ { _L("Commands"), "" }, commands_shortcuts });
+    }
 
-    plater_shortcuts.push_back(Shortcut("A",        L("Arrange")));
-    plater_shortcuts.push_back(Shortcut(ctrl+"A",   L("Select All objects")));
-    plater_shortcuts.push_back(Shortcut("Del",      L("Delete selected")));
-    plater_shortcuts.push_back(Shortcut(ctrl+"Del", L("Delete All")));
-    plater_shortcuts.push_back(Shortcut("M",        L("Gizmo move")));
-    plater_shortcuts.push_back(Shortcut("S",        L("Gizmo scale")));
-    plater_shortcuts.push_back(Shortcut("R",        L("Gizmo rotate")));
-    plater_shortcuts.push_back(Shortcut("C",        L("Gizmo cut")));
-    plater_shortcuts.push_back(Shortcut("F",        L("Gizmo Place face on bed")));
-    plater_shortcuts.push_back(Shortcut("L",        L("Gizmo SLA support points")));
-    plater_shortcuts.push_back(Shortcut("Shift+",   L("Press to snap by 5% in Gizmo scale\nor by 1mm in Gizmo move")));
-    plater_shortcuts.push_back(Shortcut(alt,        L("Press to scale or rotate selected objects\naround their own center")));
-    plater_shortcuts.push_back(Shortcut("B",        L("Zoom to Bed")));
-    plater_shortcuts.push_back(Shortcut("Z",        L("Zoom to all objects in scene, if none selected")));
-    plater_shortcuts.push_back(Shortcut("Z",        L("Zoom to selected object")));
-    plater_shortcuts.push_back(Shortcut("I",        L("Zoom in")));
-    plater_shortcuts.push_back(Shortcut("O",        L("Zoom out")));
-    plater_shortcuts.push_back(Shortcut("ESC",      L("Unselect gizmo, keep object selection")));
+    Shortcuts preview_shortcuts = {
+#if ENABLE_ARROW_KEYS_WITH_SLIDERS
+        { L("Arrow Up"),    L("Vertical slider - Move active thumb Up") },
+        { L("Arrow Down"),  L("Vertical slider - Move active thumb Down") },
+        { L("Arrow Left"),  L("Horizontal slider - Move active thumb Left") },
+        { L("Arrow Right"), L("Horizontal slider - Move active thumb Right") },
+        { "W", L("Vertical slider - Move active thumb Up") },
+        { "S", L("Vertical slider - Move active thumb Down") },
+        { "A", L("Horizontal slider - Move active thumb Left") },
+        { "D", L("Horizontal slider - Move active thumb Right") },
+        { "X", L("On/Off one layer mode of the vertical slider") },
+        { "L", L("Show/Hide Legend and Estimated printing time") },
+#else
+        { L("Arrow Up"), L("Upper layer") },
+        { L("Arrow Down"), L("Lower layer") },
+        { "U", L("Upper Layer") },
+        { "D", L("Lower Layer") },
+        { "L", L("Show/Hide Legend & Estimated printing time") },
+#endif // ENABLE_ARROW_KEYS_WITH_SLIDERS
+    };
 
-    m_full_shortcuts.push_back(std::make_pair(_(L("Plater Shortcuts")), std::make_pair(plater_shortcuts, 1)));
+    m_full_shortcuts.push_back({ { _L("Preview"), "" }, preview_shortcuts });
 
+    Shortcuts layers_slider_shortcuts = {
+#if ENABLE_ARROW_KEYS_WITH_SLIDERS
+        { L("Arrow Up"),    L("Move active thumb Up") },
+        { L("Arrow Down"),  L("Move active thumb Down") },
+        { L("Arrow Left"),  L("Set upper thumb as active") },
+        { L("Arrow Right"), L("Set lower thumb as active") },
+        { "+", L("Add color change marker for current layer") },
+        { "-", L("Delete color change marker for current layer") },
+#else
+        { L("Arrow Up"), L("Move current slider thumb Up") },
+        { L("Arrow Down"), L("Move current slider thumb Down") },
+        { L("Arrow Left"), L("Set upper thumb to current slider thumb") },
+        { L("Arrow Right"), L("Set lower thumb to current slider thumb") },
+        { "+", L("Add color change marker for current layer") },
+        { "-", L("Delete color change marker for current layer") },
+#endif // ENABLE_ARROW_KEYS_WITH_SLIDERS
+        { "Shift+", L("Press to speed up 5 times while moving thumb\nwith arrow keys or mouse wheel") },
+        { ctrl, L("Press to speed up 5 times while moving thumb\nwith arrow keys or mouse wheel") },
+    };
 
-//     Shortcuts gizmo_shortcuts;
-//     gizmo_shortcuts.reserve(2);
-// 
-//     gizmo_shortcuts.push_back(Shortcut("Shift+",    L("Press to snap by 5% in Gizmo Scale\n or by 1mm in Gizmo Move")));
-//     gizmo_shortcuts.push_back(Shortcut(alt,         L("Press to scale or rotate selected objects around their own center")));
-// 
-//     m_full_shortcuts.push_back(std::make_pair(_(L("Gizmo Shortcuts")), std::make_pair(gizmo_shortcuts, 1)));
+    m_full_shortcuts.push_back({ { _L("Vertical Slider"), _L("The following shortcuts are applicable in G-code preview when the vertical slider is active") }, layers_slider_shortcuts });
 
+    Shortcuts sequential_slider_shortcuts = {
+#if ENABLE_ARROW_KEYS_WITH_SLIDERS
+        { L("Arrow Left"),  L("Move active thumb Left") },
+        { L("Arrow Right"), L("Move active thumb Right") },
+        { L("Arrow Up"),    L("Set left thumb as active") },
+        { L("Arrow Down"),  L("Set right thumb as active") },
+#else
+        { L("Arrow Left"),  L("Move active slider thumb Left") },
+        { L("Arrow Right"), L("Move active slider thumb Right") },
+#endif // ENABLE_ARROW_KEYS_WITH_SLIDERS
+        { "Shift+", L("Press to speed up 5 times while moving thumb\nwith arrow keys or mouse wheel") },
+        { ctrl, L("Press to speed up 5 times while moving thumb\nwith arrow keys or mouse wheel") },
+    };
 
-    Shortcuts preview_shortcuts;
-    preview_shortcuts.reserve(4);
-
-    preview_shortcuts.push_back(Shortcut(L("Arrow Up"),     L("Upper Layer")));
-    preview_shortcuts.push_back(Shortcut(L("Arrow Down"),   L("Lower Layer")));
-    preview_shortcuts.push_back(Shortcut("U",               L("Upper Layer")));
-    preview_shortcuts.push_back(Shortcut("D",               L("Lower Layer")));
-
-    m_full_shortcuts.push_back(std::make_pair( _(L("Preview Shortcuts")), std::make_pair(preview_shortcuts, 0) ));
-
-
-    Shortcuts layers_slider_shortcuts;
-    layers_slider_shortcuts.reserve(6);
-
-    layers_slider_shortcuts.push_back(Shortcut(L("Arrow Up"),   L("Move current slider thump Up")));
-    layers_slider_shortcuts.push_back(Shortcut(L("Arrow Down"), L("Move current slider thump Down")));
-    layers_slider_shortcuts.push_back(Shortcut(L("Arrow Left"), L("Set upper thumb to current slider thumb")));
-    layers_slider_shortcuts.push_back(Shortcut(L("Arrow Right"),L("Set lower thumb to current slider thumb")));
-    layers_slider_shortcuts.push_back(Shortcut("+",             L("Add color change marker for current layer")));
-    layers_slider_shortcuts.push_back(Shortcut("-",             L("Delete color change marker for current layer")));
-
-    m_full_shortcuts.push_back(std::make_pair( _(L("Layers Slider Shortcuts")), std::make_pair(layers_slider_shortcuts, 1) ));
+    m_full_shortcuts.push_back({ { _L("Horizontal Slider"), _L("The following shortcuts are applicable in G-code preview when the horizontal slider is active") }, sequential_slider_shortcuts });
 }
 
-void KBShortcutsDialog::onCloseDialog(wxEvent &)
+wxPanel* KBShortcutsDialog::create_header(wxWindow* parent, const wxFont& bold_font)
 {
-    this->EndModal(wxID_CLOSE);
-    this->Close();
+    wxPanel* panel = new wxPanel(parent);
+    wxBoxSizer* sizer = new wxBoxSizer(wxHORIZONTAL);
+
+    wxFont header_font = bold_font;
+#ifdef __WXOSX__
+    header_font.SetPointSize(14);
+#else
+    header_font.SetPointSize(bold_font.GetPointSize() + 2);
+#endif // __WXOSX__
+
+    sizer->AddStretchSpacer();
+
+    // logo
+    m_logo_bmp = ScalableBitmap(this, wxGetApp().is_editor() ? "PrusaSlicer_32px.png" : "PrusaSlicer-gcodeviewer_32px.png", 32);
+    m_header_bitmap = new wxStaticBitmap(panel, wxID_ANY, m_logo_bmp.bmp());
+    sizer->Add(m_header_bitmap, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+
+    // text
+    wxStaticText* text = new wxStaticText(panel, wxID_ANY, _L("Keyboard shortcuts"));
+    text->SetFont(header_font);
+    sizer->Add(text, 0, wxALIGN_CENTER_VERTICAL);
+
+    sizer->AddStretchSpacer();
+
+    panel->SetSizer(sizer);
+    return panel;
+}
+
+wxPanel* KBShortcutsDialog::create_page(wxWindow* parent, const ShortcutsItem& shortcuts, const wxFont& font, const wxFont& bold_font)
+{
+    wxPanel* main_page = new wxPanel(parent);
+    wxBoxSizer* main_sizer = new wxBoxSizer(wxVERTICAL);
+
+    if (!shortcuts.first.second.empty()) {
+        main_sizer->AddSpacer(10);
+        wxBoxSizer* info_sizer = new wxBoxSizer(wxHORIZONTAL);
+        info_sizer->AddStretchSpacer();
+        info_sizer->Add(new wxStaticText(main_page, wxID_ANY, shortcuts.first.second), 0);
+        info_sizer->AddStretchSpacer();
+        main_sizer->Add(info_sizer, 0, wxEXPAND);
+        main_sizer->AddSpacer(10);
+    }
+
+    static const int max_items_per_column = 20;
+    int columns_count = 1 + static_cast<int>(shortcuts.second.size()) / max_items_per_column;
+
+    wxScrolledWindow* scrollable_panel = new wxScrolledWindow(main_page);
+    scrollable_panel->SetScrollbars(20, 20, 50, 50);
+    scrollable_panel->SetInitialSize(wxSize(850, 450));
+
+    wxBoxSizer* scrollable_panel_sizer = new wxBoxSizer(wxVERTICAL);
+    wxFlexGridSizer* grid_sizer = new wxFlexGridSizer(2 * columns_count, 5, 15);
+
+    int items_count = (int)shortcuts.second.size();
+    for (int i = 0; i < max_items_per_column; ++i) {
+        for (int j = 0; j < columns_count; ++j) {
+            int id = j * max_items_per_column + i;
+            if (id < items_count) {
+                const auto& [shortcut, description] = shortcuts.second[id];
+                auto key = new wxStaticText(scrollable_panel, wxID_ANY, _(shortcut));
+                key->SetFont(bold_font);
+                grid_sizer->Add(key, 0, wxALIGN_CENTRE_VERTICAL);
+
+                auto desc = new wxStaticText(scrollable_panel, wxID_ANY, _(description));
+                desc->SetFont(font);
+                grid_sizer->Add(desc, 0, wxALIGN_CENTRE_VERTICAL);
+            }
+            else {
+                if (columns_count > 1) {
+                    grid_sizer->Add(new wxStaticText(scrollable_panel, wxID_ANY, ""), 0, wxALIGN_CENTRE_VERTICAL);
+                    grid_sizer->Add(new wxStaticText(scrollable_panel, wxID_ANY, ""), 0, wxALIGN_CENTRE_VERTICAL);
+                }
+            }
+        }
+    }
+
+    scrollable_panel_sizer->Add(grid_sizer, 1, wxEXPAND | wxALL, 10);
+    scrollable_panel->SetSizer(scrollable_panel_sizer);
+
+    main_sizer->Add(scrollable_panel, 1, wxEXPAND);
+    main_page->SetSizer(main_sizer);
+
+    return main_page;
 }
 
 } // namespace GUI
