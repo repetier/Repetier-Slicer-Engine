@@ -2,9 +2,12 @@
 #include "I18N.hpp"
 
 #include "../Config/Snapshot.hpp"
-#include "../Utils/Time.hpp"
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/Time.hpp"
+#include "GUI_App.hpp"
+#include "MainFrame.hpp"
+#include "wxExtensions.hpp"
 
 namespace Slic3r { 
 namespace GUI {
@@ -33,24 +36,37 @@ static wxString generate_html_row(const Config::Snapshot &snapshot, bool row_eve
     text += snapshot_active ? "#B3FFCB" : (row_even ? "#FFFFFF" : "#D5D5D5");
     text += "\">";
     text += "<td>";
+    
+    static const constexpr char *LOCALE_TIME_FMT = "%x %X";
+    wxString datetime = wxDateTime(snapshot.time_captured).Format(LOCALE_TIME_FMT);
+    
     // Format the row header.
-    text += wxString("<font size=\"5\"><b>") + (snapshot_active ? _(L("Active: ")) : "") + 
-        Utils::format_local_date_time(snapshot.time_captured) + ": " + format_reason(snapshot.reason);
+    text += wxString("<font size=\"5\"><b>") + (snapshot_active ? _(L("Active")) + ": " : "") +
+            datetime + ": " + format_reason(snapshot.reason);
+    
     if (! snapshot.comment.empty())
-        text += " (" + snapshot.comment + ")";
+        text += " (" + wxString::FromUTF8(snapshot.comment.data()) + ")";
     text += "</b></font><br>";
     // End of row header.
-    text += _(L("slic3r version")) + ": " + snapshot.slic3r_version_captured.to_string() + "<br>";
-    text += _(L("print")) + ": " + snapshot.print + "<br>";
-    text += _(L("filaments")) + ": " + snapshot.filaments.front() + "<br>";
-    text += _(L("printer")) + ": " + snapshot.printer + "<br>";
+    text += _(L("PrusaSlicer version")) + ": " + snapshot.slic3r_version_captured.to_string() + "<br>";
+    bool has_fff = ! snapshot.print.empty() || ! snapshot.filaments.empty();
+    bool has_sla = ! snapshot.sla_print.empty() || ! snapshot.sla_material.empty();
+    if (has_fff || ! has_sla) {
+        text += _(L("print")) + ": " + snapshot.print + "<br>";
+        text += _(L("filaments")) + ": " + snapshot.filaments.front() + "<br>";
+    }
+    if (has_sla) {
+        text += _(L("SLA print")) + ": " + snapshot.sla_print + "<br>";
+        text += _(L("SLA material")) + ": " + snapshot.sla_material + "<br>";
+    }
+    text += _(L("printer")) + ": " + (snapshot.physical_printer.empty() ? snapshot.printer : snapshot.physical_printer) + "<br>";
 
     bool compatible = true;
     for (const Config::Snapshot::VendorConfig &vc : snapshot.vendor_configs) {
         text += _(L("vendor")) + ": " + vc.name +", " + _(L("version")) + ": " + vc.version.config_version.to_string() + 
-				", " + _(L("min slic3r version")) + ": " + vc.version.min_slic3r_version.to_string();
+				", " + _(L("min PrusaSlicer version")) + ": " + vc.version.min_slic3r_version.to_string();
         if (vc.version.max_slic3r_version != Semver::inf())
-            text += ", " + _(L("max slic3r version")) + ": " + vc.version.max_slic3r_version.to_string();
+            text += ", " + _(L("max PrusaSlicer version")) + ": " + vc.version.max_slic3r_version.to_string();
         text += "<br>";
         for (const std::pair<std::string, std::set<std::string>> &model : vc.models_variants_installed) {
             text += _(L("model")) + ": " + model.first + ", " + _(L("variants")) + ": ";
@@ -65,7 +81,7 @@ static wxString generate_html_row(const Config::Snapshot &snapshot, bool row_eve
     }
 
     if (! compatible) {
-        text += "<p align=\"right\">" + _(L("Incompatible with this Slic3r")) + "</p>";
+        text += "<p align=\"right\">" + from_u8((boost::format(_utf8(L("Incompatible with this %s"))) % SLIC3R_APP_NAME).str()) + "</p>";
     }
     else if (! snapshot_active)
         text += "<p align=\"right\"><a href=\"" + snapshot.id + "\">" + _(L("Activate")) + "</a></p>";
@@ -94,19 +110,26 @@ static wxString generate_html_page(const Config::SnapshotDB &snapshot_db, const 
 }
 
 ConfigSnapshotDialog::ConfigSnapshotDialog(const Config::SnapshotDB &snapshot_db, const wxString &on_snapshot)
-    : wxDialog(NULL, wxID_ANY, _(L("Configuration Snapshots")), wxDefaultPosition, wxSize(600, 500), wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMAXIMIZE_BOX)
+    : DPIDialog(static_cast<wxWindow*>(wxGetApp().mainframe), wxID_ANY, _(L("Configuration Snapshots")), wxDefaultPosition,
+               wxSize(45 * wxGetApp().em_unit(), 40 * wxGetApp().em_unit()), 
+               wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMAXIMIZE_BOX)
 {
+    this->SetFont(wxGetApp().normal_font());
     this->SetBackgroundColour(*wxWHITE);
     
     wxBoxSizer* vsizer = new wxBoxSizer(wxVERTICAL);
     this->SetSizer(vsizer);
 
     // text
-    wxHtmlWindow* html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHW_SCROLLBAR_AUTO);
+    html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHW_SCROLLBAR_AUTO);
     {
-        wxFont font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+        wxFont font = get_default_font(this);
         #ifdef __WXMSW__
-            int size[] = {8,8,8,8,11,11,11};
+            const int fs = font.GetPointSize();
+            const int fs1 = static_cast<int>(0.8f*fs);
+            const int fs2 = static_cast<int>(1.1f*fs);
+            int size[] = {fs1, fs1, fs1, fs1, fs2, fs2, fs2};
+//             int size[] = {8,8,8,8,11,11,11};
         #else
             int size[] = {11,11,11,11,14,14,14};
         #endif
@@ -124,17 +147,37 @@ ConfigSnapshotDialog::ConfigSnapshotDialog(const Config::SnapshotDB &snapshot_db
     vsizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, 3);
 }
 
+void ConfigSnapshotDialog::on_dpi_changed(const wxRect &suggested_rect)
+{
+    wxFont font = get_default_font(this);
+    const int fs = font.GetPointSize();
+    const int fs1 = static_cast<int>(0.8f*fs);
+    const int fs2 = static_cast<int>(1.1f*fs);
+    int font_size[] = { fs1, fs1, fs1, fs1, fs2, fs2, fs2 };
+
+    html->SetFonts(font.GetFaceName(), font.GetFaceName(), font_size);
+    html->Refresh();
+
+    const int& em = em_unit();
+
+    msw_buttons_rescale(this, em, { wxID_CLOSE});
+
+    const wxSize& size = wxSize(45 * em, 40 * em);
+    SetMinSize(size);
+    Fit();
+
+    Refresh();
+}
+
 void ConfigSnapshotDialog::onLinkClicked(wxHtmlLinkEvent &event)
 {
-    m_snapshot_to_activate = event.GetLinkInfo().GetHref();
+    m_snapshot_to_activate = event.GetLinkInfo().GetHref().ToUTF8();
     this->EndModal(wxID_CLOSE);
-    this->Close();
 }
 
 void ConfigSnapshotDialog::onCloseDialog(wxEvent &)
 {
     this->EndModal(wxID_CLOSE);
-    this->Close();
 }
 
 } // namespace GUI

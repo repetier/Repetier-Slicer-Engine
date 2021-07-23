@@ -107,7 +107,7 @@ int avrdude_message(const int msglvl, const char *format, ...)
             if (rc > 0 && rc < MSGBUFFER_SIZE) {
                 avrdude_message_handler(msgbuffer, rc, avrdude_message_handler_user_p);
             } else {
-                avrdude_message_handler(format_error, strlen(format_error), avrdude_message_handler_user_p);
+                avrdude_message_handler(format_error, (unsigned)strlen(format_error), avrdude_message_handler_user_p);
             }
         }
 
@@ -426,7 +426,7 @@ static int cleanup_main(int status)
 /*
  * main routine
  */
-int avrdude_main(int argc, char * argv [], const char *sys_config)
+int avrdude_main(int argc, char * argv [])
 {
   int              rc;          /* general return code checking */
   int              exitrc;      /* exit code for main() */
@@ -567,7 +567,7 @@ int avrdude_main(int argc, char * argv [], const char *sys_config)
 
 // #endif
 
-  len = strlen(progname) + 2;
+  len = (int)strlen(progname) + 2;
   for (i=0; i<len; i++)
     progbuf[i] = ' ';
   progbuf[i] = 0;
@@ -601,7 +601,7 @@ int avrdude_main(int argc, char * argv [], const char *sys_config)
 	bitclock = strtod(optarg, &e);
 	if (*e != 0) {
 	  /* trailing unit of measure present */
-	  int suffixlen = strlen(e);
+	  size_t suffixlen = strlen(e);
 	  switch (suffixlen) {
 	  case 2:
 	    if ((e[0] != 'h' && e[0] != 'H') || e[1] != 'z')
@@ -807,13 +807,15 @@ int avrdude_main(int argc, char * argv [], const char *sys_config)
                     "%sCopyright (c) 2000-2005 Brian Dean, http://www.bdmicro.com/\n"
                     "%sCopyright (c) 2007-2014 Joerg Wunsch\n\n",
                     progname, version, __DATE__, __TIME__, progbuf, progbuf);
-  avrdude_message(MSG_NOTICE, "%sSystem wide configuration file is \"%s\"\n",
-            progbuf, sys_config);
+  // avrdude_message(MSG_NOTICE, "%sSystem wide configuration file is \"%s\"\n",
+  //           progbuf, sys_config);
 
-  rc = read_config(sys_config);
+  // rc = read_config(sys_config);
+  rc = read_config_builtin();
   if (rc) {
-    avrdude_message(MSG_INFO, "%s: error reading system wide configuration file \"%s\"\n",
-                    progname, sys_config);
+    // avrdude_message(MSG_INFO, "%s: error reading system wide configuration file \"%s\"\n",
+    //                 progname, sys_config);
+    avrdude_message(MSG_INFO, "%s: error reading built-in configuration file\n", progname);
     return cleanup_main(1);
   }
 
@@ -1082,6 +1084,7 @@ int avrdude_main(int argc, char * argv [], const char *sys_config)
   if (rc < 0) {
     exitrc = 1;
     pgm->ppidata = 0; /* clear all bits at exit */
+    avrdude_message(MSG_INFO, "%s: Could not open port: %s\n", progname, port);
     goto main_exit;
   }
   is_open = 1;

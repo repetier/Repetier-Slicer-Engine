@@ -9,11 +9,15 @@
 
 #include <wx/string.h>
 #include <wx/app.h>
+#include <wx/arrstr.h>
 
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Channel.hpp"
 #include "OctoPrint.hpp"
 #include "Duet.hpp"
+#include "FlashAir.hpp"
+#include "AstroBox.hpp"
+#include "Repetier.hpp"
 #include "../GUI/PrintHostDialogs.hpp"
 
 namespace fs = boost::filesystem;
@@ -27,14 +31,30 @@ PrintHost::~PrintHost() {}
 
 PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config)
 {
-    const auto opt = config->option<ConfigOptionEnum<PrintHostType>>("host_type");
-    if (opt == nullptr) { return nullptr; }
+    PrinterTechnology tech = ptFFF;
 
-    switch (opt->value) {
-        case htOctoPrint: return new OctoPrint(config);
-        case htDuet:      return new Duet(config);
-        case htSL1:       return new SLAHost(config);
-        default: return nullptr;
+    {
+        const auto opt = config->option<ConfigOptionEnum<PrinterTechnology>>("printer_technology");
+        if (opt != nullptr) {
+            tech = opt->value;
+        }
+    }
+
+    if (tech == ptFFF) {
+        const auto opt = config->option<ConfigOptionEnum<PrintHostType>>("host_type");
+        const auto host_type = opt != nullptr ? opt->value : htOctoPrint;
+
+        switch (host_type) {
+            case htOctoPrint: return new OctoPrint(config);
+            case htDuet:      return new Duet(config);
+            case htFlashAir:  return new FlashAir(config);
+            case htAstroBox:  return new AstroBox(config);
+            case htRepetier:  return new Repetier(config);
+            case htPrusaLink: return new PrusaLink(config);
+            default:          return nullptr;
+        }
+    } else {
+        return new SL1Host(config);
     }
 }
 
@@ -158,8 +178,6 @@ void PrintHostJobQueue::priv::bg_thread_main()
         }
     } catch (const std::exception &e) {
         emit_error(e.what());
-    } catch (...) {
-        emit_error("Unknown exception");
     }
 
     // Cleanup leftover files, if any
@@ -257,6 +275,5 @@ void PrintHostJobQueue::cancel(size_t id)
 {
     p->channel_cancels.push(id);
 }
-
 
 }

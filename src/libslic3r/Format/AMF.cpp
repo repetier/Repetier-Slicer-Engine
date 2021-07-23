@@ -1,21 +1,31 @@
+#include <limits>
 #include <string.h>
 #include <map>
 #include <string>
-#include <expat/expat.h>
+#include <expat.h>
 
 #include <boost/nowide/cstdio.hpp>
 
 #include "../libslic3r.h"
+#include "../Exception.hpp"
 #include "../Model.hpp"
 #include "../GCode.hpp"
 #include "../PrintConfig.hpp"
 #include "../Utils.hpp"
+#include "../I18N.hpp"
+#include "../Geometry.hpp"
+#include "../CustomGCode.hpp"
+
 #include "AMF.hpp"
+
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/xml_parser.hpp>
+namespace pt = boost::property_tree;
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/nowide/fstream.hpp>
-#include <miniz/miniz_zip.h>
+#include "miniz_extension.hpp"
 
 #if 0
 // Enable debugging and assert in this file.
@@ -33,7 +43,11 @@
 //     Added x and y components of rotation
 //     Added x, y and z components of scale
 //     Added x, y and z components of mirror
+// 3 : Added volumes' matrices and source data, meshes transformed back to their coordinate system on loading.
+// WARNING !! -> the version number has been rolled back to 2
+//               the next change should use 4
 const unsigned int VERSION_AMF = 2;
+const unsigned int VERSION_AMF_COMPATIBLE = 3;
 const char* SLIC3RPE_AMF_VERSION = "slic3rpe_amf_version";
 
 const char* SLIC3R_CONFIG_TYPE = "slic3rpe_config";
@@ -41,24 +55,38 @@ const char* SLIC3R_CONFIG_TYPE = "slic3rpe_config";
 namespace Slic3r
 {
 
+//! macro used to mark string used at localization,
+//! return same string
+#define L(s) (s)
+#define _(s) Slic3r::I18N::translate(s)
+
 struct AMFParserContext
 {
-    AMFParserContext(XML_Parser parser, DynamicPrintConfig *config, Model *model) :
-        m_version(0),
+    AMFParserContext(XML_Parser parser, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model) :
         m_parser(parser),
         m_model(*model), 
-        m_object(nullptr), 
-        m_volume(nullptr),
-        m_material(nullptr),
-        m_instance(nullptr),
-        m_config(config)
+        m_config(config),
+        m_config_substitutions(config_substitutions)
     {
         m_path.reserve(12);
     }
 
-    void stop() 
+    void stop(const std::string &msg = std::string())
     {
+        assert(! m_error);
+        assert(m_error_message.empty());
+        m_error = true;
+        m_error_message = msg;
         XML_StopParser(m_parser, 0);
+    }
+
+    bool        error()         const { return m_error; }
+    const char* error_message() const {
+        return m_error ?
+            // The error was signalled by the user code, not the expat parser.
+            (m_error_message.empty() ? "Invalid AMF format" : m_error_message.c_str()) :
+            // The error was signalled by the expat parser.
+            XML_ErrorString(XML_GetErrorCode(m_parser));
     }
 
     void startElement(const char *name, const char **atts);
@@ -105,6 +133,9 @@ struct AMFParserContext
                                         // amf/material/metadata
         NODE_TYPE_OBJECT,               // amf/object
                                         // amf/object/metadata
+        NODE_TYPE_LAYER_CONFIG,         // amf/object/layer_config_ranges
+        NODE_TYPE_RANGE,                // amf/object/layer_config_ranges/range
+                                        // amf/object/layer_config_ranges/range/metadata
         NODE_TYPE_MESH,                 // amf/object/mesh
         NODE_TYPE_VERTICES,             // amf/object/mesh/vertices
         NODE_TYPE_VERTEX,               // amf/object/mesh/vertices/vertex
@@ -133,6 +164,10 @@ struct AMFParserContext
         NODE_TYPE_MIRRORX,              // amf/constellation/instance/mirrorx
         NODE_TYPE_MIRRORY,              // amf/constellation/instance/mirrory
         NODE_TYPE_MIRRORZ,              // amf/constellation/instance/mirrorz
+        NODE_TYPE_PRINTABLE,            // amf/constellation/instance/mirrorz
+        NODE_TYPE_CUSTOM_GCODE,         // amf/custom_code_per_height
+        NODE_TYPE_GCODE_PER_HEIGHT,     // amf/custom_code_per_height/code
+        NODE_TYPE_CUSTOM_GCODE_MODE,    // amf/custom_code_per_height/mode
         NODE_TYPE_METADATA,             // anywhere under amf/*/metadata
     };
 
@@ -141,7 +176,8 @@ struct AMFParserContext
             : deltax_set(false), deltay_set(false), deltaz_set(false)
             , rx_set(false), ry_set(false), rz_set(false)
             , scalex_set(false), scaley_set(false), scalez_set(false)
-            , mirrorx_set(false), mirrory_set(false), mirrorz_set(false) {}
+            , mirrorx_set(false), mirrory_set(false), mirrorz_set(false)
+            , printable(true) {}
         // Shift in the X axis.
         float deltax;
         bool  deltax_set;
@@ -174,6 +210,13 @@ struct AMFParserContext
         bool  mirrory_set;
         float mirrorz;
         bool  mirrorz_set;
+        // printable property
+        bool  printable;
+
+        bool anything_set() const { return deltax_set || deltay_set || deltaz_set ||
+                                           rx_set || ry_set || rz_set ||
+                                           scalex_set || scaley_set || scalez_set ||
+                                           mirrorx_set || mirrory_set || mirrorz_set; }
     };
 
     struct Object {
@@ -183,31 +226,39 @@ struct AMFParserContext
     };
 
     // Version of the amf file
-    unsigned int m_version;
+    unsigned int             m_version { 0 };
     // Current Expat XML parser instance.
     XML_Parser               m_parser;
+    // Error code returned by the application side of the parser. In that case the expat may not reliably deliver the error state
+    // after returning from XML_Parse() function, thus we keep the error state here.
+    bool                     m_error { false };
+    std::string              m_error_message;
     // Model to receive objects extracted from an AMF file.
     Model                   &m_model;
     // Current parsing path in the XML file.
     std::vector<AMFNodeType> m_path;
     // Current object allocated for an amf/object XML subtree.
-    ModelObject             *m_object;
+    ModelObject             *m_object { nullptr };
     // Map from obect name to object idx & instances.
     std::map<std::string, Object> m_object_instances_map;
     // Vertices parsed for the current m_object.
     std::vector<float>       m_object_vertices;
     // Current volume allocated for an amf/object/mesh/volume subtree.
-    ModelVolume             *m_volume;
+    ModelVolume             *m_volume { nullptr };
     // Faces collected for the current m_volume.
     std::vector<int>         m_volume_facets;
+    // Transformation matrix of a volume mesh from its coordinate system to Object's coordinate system.
+    Transform3d 			 m_volume_transform;
     // Current material allocated for an amf/metadata subtree.
-    ModelMaterial           *m_material;
+    ModelMaterial           *m_material { nullptr };
     // Current instance allocated for an amf/constellation/instance subtree.
-    Instance                *m_instance;
+    Instance                *m_instance { nullptr };
     // Generic string buffer for vertices, face indices, metadata etc.
-    std::string              m_value[3];
+    std::string              m_value[5];
     // Pointer to config to update if config data are stored inside the amf file
-    DynamicPrintConfig      *m_config;
+    DynamicPrintConfig      *m_config { nullptr };
+    // Config substitution rules and collected config substitution log.
+    ConfigSubstitutionContext *m_config_substitutions { nullptr };
 
 private:
     AMFParserContext& operator=(AMFParserContext&);
@@ -246,6 +297,8 @@ void AMFParserContext::startElement(const char *name, const char **atts)
             }
         } else if (strcmp(name, "constellation") == 0) {
             node_type_new = NODE_TYPE_CONSTELLATION;
+        } else if (strcmp(name, "custom_gcodes_per_height") == 0) {
+            node_type_new = NODE_TYPE_CUSTOM_GCODE;
         }
         break;
     case 2:
@@ -254,7 +307,9 @@ void AMFParserContext::startElement(const char *name, const char **atts)
                 m_value[0] = get_attribute(atts, "type");
                 node_type_new = NODE_TYPE_METADATA;
             }
-        } else if (strcmp(name, "mesh") == 0) {
+        } else if (strcmp(name, "layer_config_ranges") == 0 && m_path[1] == NODE_TYPE_OBJECT)
+                node_type_new = NODE_TYPE_LAYER_CONFIG;
+        else if (strcmp(name, "mesh") == 0) {
             if (m_path[1] == NODE_TYPE_OBJECT)
                 node_type_new = NODE_TYPE_MESH;
         } else if (strcmp(name, "instance") == 0) {
@@ -270,6 +325,36 @@ void AMFParserContext::startElement(const char *name, const char **atts)
             }
             else
                 this->stop();
+        } 
+        else if (m_path[1] == NODE_TYPE_CUSTOM_GCODE) {
+            if (strcmp(name, "code") == 0) {
+                node_type_new = NODE_TYPE_GCODE_PER_HEIGHT;
+                m_value[0] = get_attribute(atts, "print_z");
+                m_value[1] = get_attribute(atts, "extruder");
+                m_value[2] = get_attribute(atts, "color");
+                if (get_attribute(atts, "type"))
+                {
+                    m_value[3] = get_attribute(atts, "type");
+                    m_value[4] = get_attribute(atts, "extra");
+                }
+                else
+                {
+                    // It means that data was saved in old version (2.2.0 and older) of PrusaSlicer
+                    // read old data ... 
+                    std::string gcode = get_attribute(atts, "gcode");
+                    // ... and interpret them to the new data
+                    CustomGCode::Type type= gcode == "M600" ? CustomGCode::ColorChange :
+                                            gcode == "M601" ? CustomGCode::PausePrint :
+                                            gcode == "tool_change" ? CustomGCode::ToolChange : CustomGCode::Custom;
+                    m_value[3] = std::to_string(static_cast<int>(type));
+                    m_value[4] = type == CustomGCode::PausePrint ? m_value[2] :
+                                 type == CustomGCode::Custom ? gcode : "";
+                }
+            }
+            else if (strcmp(name, "mode") == 0) {
+                node_type_new = NODE_TYPE_CUSTOM_GCODE_MODE;
+                m_value[0] = get_attribute(atts, "value");
+            }
         }
         break;
     case 3:
@@ -280,6 +365,7 @@ void AMFParserContext::startElement(const char *name, const char **atts)
 			else if (strcmp(name, "volume") == 0) {
 				assert(! m_volume);
                 m_volume = m_object->add_volume(TriangleMesh());
+                m_volume_transform = Transform3d::Identity();
                 node_type_new = NODE_TYPE_VOLUME;
 			}
         } else if (m_path[2] == NODE_TYPE_INSTANCE) {
@@ -310,6 +396,12 @@ void AMFParserContext::startElement(const char *name, const char **atts)
                 node_type_new = NODE_TYPE_MIRRORY;
             else if (strcmp(name, "mirrorz") == 0)
                 node_type_new = NODE_TYPE_MIRRORZ;
+            else if (strcmp(name, "printable") == 0)
+                node_type_new = NODE_TYPE_PRINTABLE;
+        }
+        else if (m_path[2] == NODE_TYPE_LAYER_CONFIG && strcmp(name, "range") == 0) {
+            assert(m_object);
+            node_type_new = NODE_TYPE_RANGE;
         }
         break;
     case 4:
@@ -327,6 +419,10 @@ void AMFParserContext::startElement(const char *name, const char **atts)
                 }
             } else if (strcmp(name, "triangle") == 0)
                 node_type_new = NODE_TYPE_TRIANGLE;
+        }
+        else if (m_path[3] == NODE_TYPE_RANGE && strcmp(name, "metadata") == 0) {
+            m_value[0] = get_attribute(atts, "type");
+            node_type_new = NODE_TYPE_METADATA;
         }
         break;
     case 5:
@@ -378,7 +474,8 @@ void AMFParserContext::characters(const XML_Char *s, int len)
                 m_path.back() == NODE_TYPE_SCALE ||
                 m_path.back() == NODE_TYPE_MIRRORX ||
                 m_path.back() == NODE_TYPE_MIRRORY ||
-                m_path.back() == NODE_TYPE_MIRRORZ)
+                m_path.back() == NODE_TYPE_MIRRORZ ||
+                m_path.back() == NODE_TYPE_PRINTABLE)
                 m_value[0].append(s, len);
             break;
         case 6:
@@ -488,6 +585,11 @@ void AMFParserContext::endElement(const char * /* name */)
         m_instance->mirrorz_set = true;
         m_value[0].clear();
         break;
+    case NODE_TYPE_PRINTABLE:
+        assert(m_instance);
+        m_instance->printable = bool(atoi(m_value[0].c_str()));
+        m_value[0].clear();
+        break;
 
     // Object vertices:
     case NODE_TYPE_VERTEX:
@@ -504,9 +606,9 @@ void AMFParserContext::endElement(const char * /* name */)
     // Faces of the current volume:
     case NODE_TYPE_TRIANGLE:
         assert(m_object && m_volume);
-        m_volume_facets.push_back(atoi(m_value[0].c_str()));
-        m_volume_facets.push_back(atoi(m_value[1].c_str()));
-        m_volume_facets.push_back(atoi(m_value[2].c_str()));
+        m_volume_facets.emplace_back(atoi(m_value[0].c_str()));
+        m_volume_facets.emplace_back(atoi(m_value[1].c_str()));
+        m_volume_facets.emplace_back(atoi(m_value[2].c_str()));
         m_value[0].clear();
         m_value[1].clear();
         m_value[2].clear();
@@ -516,19 +618,42 @@ void AMFParserContext::endElement(const char * /* name */)
     case NODE_TYPE_VOLUME:
     {
 		assert(m_object && m_volume);
-        stl_file &stl = m_volume->mesh.stl;
+		TriangleMesh  mesh;
+        stl_file	 &stl = mesh.stl;
         stl.stats.type = inmemory;
         stl.stats.number_of_facets = int(m_volume_facets.size() / 3);
         stl.stats.original_num_facets = stl.stats.number_of_facets;
         stl_allocate(&stl);
+
+        bool has_transform = ! m_volume_transform.isApprox(Transform3d::Identity(), 1e-10);
         for (size_t i = 0; i < m_volume_facets.size();) {
             stl_facet &facet = stl.facet_start[i/3];
-            for (unsigned int v = 0; v < 3; ++ v)
-                memcpy(facet.vertex[v].data(), &m_object_vertices[m_volume_facets[i ++] * 3], 3 * sizeof(float));
-        }
+            for (unsigned int v = 0; v < 3; ++v)
+            {
+                unsigned int tri_id = m_volume_facets[i++] * 3;
+                if (tri_id < 0 || tri_id + 2 >= m_object_vertices.size()) {
+                    this->stop("Malformed triangle mesh");
+                    return;
+                }
+                facet.vertex[v] = Vec3f(m_object_vertices[tri_id + 0], m_object_vertices[tri_id + 1], m_object_vertices[tri_id + 2]);
+            }
+        }        
         stl_get_size(&stl);
-        m_volume->mesh.repair();
-        m_volume->center_geometry();
+        mesh.repair();
+		m_volume->set_mesh(std::move(mesh));
+        // stores the volume matrix taken from the metadata, if present
+        if (has_transform)
+            m_volume->source.transform = Slic3r::Geometry::Transformation(m_volume_transform);
+        if (m_volume->source.input_file.empty() && (m_volume->type() == ModelVolumeType::MODEL_PART))
+        {
+            m_volume->source.object_idx = (int)m_model.objects.size() - 1;
+            m_volume->source.volume_idx = (int)m_model.objects.back()->volumes.size() - 1;
+            m_volume->center_geometry_after_creation();
+        }
+        else
+            // pass false if the mesh offset has been already taken from the data 
+            m_volume->center_geometry_after_creation(m_volume->source.input_file.empty());
+
         m_volume->calculate_convex_hull();
         m_volume_facets.clear();
         m_volume = nullptr;
@@ -551,62 +676,130 @@ void AMFParserContext::endElement(const char * /* name */)
         m_instance = nullptr;
         break;
 
+    case NODE_TYPE_GCODE_PER_HEIGHT: {
+        double print_z          = double(atof(m_value[0].c_str()));
+        int extruder            = atoi(m_value[1].c_str());
+        const std::string& color= m_value[2];
+        CustomGCode::Type type  = static_cast<CustomGCode::Type>(atoi(m_value[3].c_str()));
+        const std::string& extra= m_value[4];
+
+        m_model.custom_gcode_per_print_z.gcodes.push_back(CustomGCode::Item{print_z, type, extruder, color, extra});
+
+        for (std::string& val: m_value)
+            val.clear();
+        break;
+        }
+
+    case NODE_TYPE_CUSTOM_GCODE_MODE: {
+        const std::string& mode = m_value[0];
+
+        m_model.custom_gcode_per_print_z.mode = mode == CustomGCode::SingleExtruderMode ? CustomGCode::Mode::SingleExtruder :
+                                                mode == CustomGCode::MultiAsSingleMode  ? CustomGCode::Mode::MultiAsSingle  :
+                                                                                          CustomGCode::Mode::MultiExtruder;
+        for (std::string& val: m_value)
+            val.clear();
+        break;
+        }
+
     case NODE_TYPE_METADATA:
-        if ((m_config != nullptr) && strncmp(m_value[0].c_str(), SLIC3R_CONFIG_TYPE, strlen(SLIC3R_CONFIG_TYPE)) == 0)
-            m_config->load_from_gcode_string(m_value[1].c_str());
+        if ((m_config != nullptr) && strncmp(m_value[0].c_str(), SLIC3R_CONFIG_TYPE, strlen(SLIC3R_CONFIG_TYPE)) == 0) {
+            m_config->load_from_gcode_string(m_value[1].c_str(), *m_config_substitutions);
+        }
         else if (strncmp(m_value[0].c_str(), "slic3r.", 7) == 0) {
             const char *opt_key = m_value[0].c_str() + 7;
             if (print_config_def.options.find(opt_key) != print_config_def.options.end()) {
-                DynamicPrintConfig *config = nullptr;
+                ModelConfig *config = nullptr;
                 if (m_path.size() == 3) {
                     if (m_path[1] == NODE_TYPE_MATERIAL && m_material)
                         config = &m_material->config;
                     else if (m_path[1] == NODE_TYPE_OBJECT && m_object)
                         config = &m_object->config;
-                } else if (m_path.size() == 5 && m_path[3] == NODE_TYPE_VOLUME && m_volume)
+                }
+                else if (m_path.size() == 5 && m_path[3] == NODE_TYPE_VOLUME && m_volume)
                     config = &m_volume->config;
+                else if (m_path.size() == 5 && m_path[3] == NODE_TYPE_RANGE && m_object && !m_object->layer_config_ranges.empty()) {
+                    auto it  = --m_object->layer_config_ranges.end();
+                    config = &it->second;
+                }
                 if (config)
-                    config->set_deserialize(opt_key, m_value[1]);
+                    config->set_deserialize(opt_key, m_value[1], *m_config_substitutions);
             } else if (m_path.size() == 3 && m_path[1] == NODE_TYPE_OBJECT && m_object && strcmp(opt_key, "layer_height_profile") == 0) {
                 // Parse object's layer height profile, a semicolon separated list of floats.
-                char *p = const_cast<char*>(m_value[1].c_str());
+                char *p = m_value[1].data();
+                std::vector<coordf_t> data;
                 for (;;) {
                     char *end = strchr(p, ';');
                     if (end != nullptr)
 	                    *end = 0;
-                    m_object->layer_height_profile.push_back(float(atof(p)));
+                    data.emplace_back(float(atof(p)));
 					if (end == nullptr)
 						break;
 					p = end + 1;
                 }
+                m_object->layer_height_profile.set(std::move(data));
             }
             else if (m_path.size() == 3 && m_path[1] == NODE_TYPE_OBJECT && m_object && strcmp(opt_key, "sla_support_points") == 0) {
                 // Parse object's layer height profile, a semicolon separated list of floats.
                 unsigned char coord_idx = 0;
-                Vec3f point(Vec3f::Zero());
-                char *p = const_cast<char*>(m_value[1].c_str());
+                Eigen::Matrix<float, 5, 1, Eigen::DontAlign> point(Eigen::Matrix<float, 5, 1, Eigen::DontAlign>::Zero());
+                char *p = m_value[1].data();
                 for (;;) {
                     char *end = strchr(p, ';');
                     if (end != nullptr)
 	                    *end = 0;
 
-                    point(coord_idx) = atof(p);
-                    if (++coord_idx == 3) {
-                        m_object->sla_support_points.push_back(point);
+                    point(coord_idx) = float(atof(p));
+                    if (++coord_idx == 5) {
+                        m_object->sla_support_points.push_back(sla::SupportPoint(point));
                         coord_idx = 0;
                     }
 					if (end == nullptr)
 						break;
 					p = end + 1;
                 }
+                m_object->sla_points_status = sla::PointsStatus::UserModified;
+            }
+            else if (m_path.size() == 5 && m_path[1] == NODE_TYPE_OBJECT && m_path[3] == NODE_TYPE_RANGE && 
+                     m_object && strcmp(opt_key, "layer_height_range") == 0) {
+                // Parse object's layer_height_range, a semicolon separated doubles.
+                char* p = m_value[1].data();
+                char* end = strchr(p, ';');
+                *end = 0;
+
+                const t_layer_height_range range = {double(atof(p)), double(atof(end + 1))};
+                m_object->layer_config_ranges[range];
             }
             else if (m_path.size() == 5 && m_path[3] == NODE_TYPE_VOLUME && m_volume) {
                 if (strcmp(opt_key, "modifier") == 0) {
                     // Is this volume a modifier volume?
                     // "modifier" flag comes first in the XML file, so it may be later overwritten by the "type" flag.
-                    m_volume->set_type((atoi(m_value[1].c_str()) == 1) ? ModelVolume::PARAMETER_MODIFIER : ModelVolume::MODEL_PART);
+					m_volume->set_type((atoi(m_value[1].c_str()) == 1) ? ModelVolumeType::PARAMETER_MODIFIER : ModelVolumeType::MODEL_PART);
                 } else if (strcmp(opt_key, "volume_type") == 0) {
                     m_volume->set_type(ModelVolume::type_from_string(m_value[1]));
+                }
+                else if (strcmp(opt_key, "matrix") == 0) {
+                    m_volume_transform = Slic3r::Geometry::transform3d_from_string(m_value[1]);
+                }
+                else if (strcmp(opt_key, "source_file") == 0) {
+                    m_volume->source.input_file = m_value[1];
+                }
+                else if (strcmp(opt_key, "source_object_id") == 0) {
+                    m_volume->source.object_idx = ::atoi(m_value[1].c_str());
+                }
+                else if (strcmp(opt_key, "source_volume_id") == 0) {
+                    m_volume->source.volume_idx = ::atoi(m_value[1].c_str());
+                }
+                else if (strcmp(opt_key, "source_offset_x") == 0) {
+                    m_volume->source.mesh_offset(0) = ::atof(m_value[1].c_str());
+                }
+                else if (strcmp(opt_key, "source_offset_y") == 0) {
+                    m_volume->source.mesh_offset(1) = ::atof(m_value[1].c_str());
+                }
+                else if (strcmp(opt_key, "source_offset_z") == 0) {
+                    m_volume->source.mesh_offset(2) = ::atof(m_value[1].c_str());
+                }
+                else if (strcmp(opt_key, "source_in_inches") == 0) {
+                    m_volume->source.is_converted_from_inches = m_value[1] == "1";
                 }
             }
         } else if (m_path.size() == 3) {
@@ -642,22 +835,19 @@ void AMFParserContext::endDocument()
             continue;
         }
         for (const Instance &instance : object.second.instances)
-#if ENABLE_VOLUMES_CENTERING_FIXES
-        {
-#else
-            if (instance.deltax_set && instance.deltay_set) {
-#endif // ENABLE_VOLUMES_CENTERING_FIXES
+            if (instance.anything_set()) {
                 ModelInstance *mi = m_model.objects[object.second.idx]->add_instance();
                 mi->set_offset(Vec3d(instance.deltax_set ? (double)instance.deltax : 0.0, instance.deltay_set ? (double)instance.deltay : 0.0, instance.deltaz_set ? (double)instance.deltaz : 0.0));
                 mi->set_rotation(Vec3d(instance.rx_set ? (double)instance.rx : 0.0, instance.ry_set ? (double)instance.ry : 0.0, instance.rz_set ? (double)instance.rz : 0.0));
                 mi->set_scaling_factor(Vec3d(instance.scalex_set ? (double)instance.scalex : 1.0, instance.scaley_set ? (double)instance.scaley : 1.0, instance.scalez_set ? (double)instance.scalez : 1.0));
                 mi->set_mirror(Vec3d(instance.mirrorx_set ? (double)instance.mirrorx : 1.0, instance.mirrory_set ? (double)instance.mirrory : 1.0, instance.mirrorz_set ? (double)instance.mirrorz : 1.0));
+                mi->printable = instance.printable;
         }
     }
 }
 
 // Load an AMF file into a provided model.
-bool load_amf_file(const char *path, DynamicPrintConfig *config, Model *model)
+bool load_amf_file(const char *path, DynamicPrintConfig *config, ConfigSubstitutionContext *config_substitutions, Model *model)
 {
     if ((path == nullptr) || (model == nullptr))
         return false;
@@ -674,7 +864,7 @@ bool load_amf_file(const char *path, DynamicPrintConfig *config, Model *model)
         return false;
     }
 
-    AMFParserContext ctx(parser, config, model);
+    AMFParserContext ctx(parser, config, config_substitutions, model);
     XML_SetUserData(parser, (void*)&ctx);
     XML_SetElementHandler(parser, AMFParserContext::startElement, AMFParserContext::endElement);
     XML_SetCharacterDataHandler(parser, AMFParserContext::characters);
@@ -688,10 +878,10 @@ bool load_amf_file(const char *path, DynamicPrintConfig *config, Model *model)
             break;
         }
         int done = feof(pFile);
-        if (XML_Parse(parser, buff, len, done) == XML_STATUS_ERROR) {
-            printf("AMF parser: Parse error at line %ul:\n%s\n",
-                  XML_GetCurrentLineNumber(parser),
-                  XML_ErrorString(XML_GetErrorCode(parser)));
+        if (XML_Parse(parser, buff, len, done) == XML_STATUS_ERROR || ctx.error()) {
+            printf("AMF parser: Parse error at line %d:\n%s\n",
+                  (int)XML_GetCurrentLineNumber(parser),
+                  ctx.error_message());
             break;
         }
         if (done) {
@@ -706,73 +896,103 @@ bool load_amf_file(const char *path, DynamicPrintConfig *config, Model *model)
     if (result)
         ctx.endDocument();
 
+    for (ModelObject* o : model->objects)
+    {
+        for (ModelVolume* v : o->volumes)
+        {
+            if (v->source.input_file.empty() && (v->type() == ModelVolumeType::MODEL_PART))
+                v->source.input_file = path;
+        }
+    }
+
     return result;
 }
 
-bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig* config, Model* model, unsigned int& version)
+bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version)
 {
     if (stat.m_uncomp_size == 0)
     {
         printf("Found invalid size\n");
-        mz_zip_reader_end(&archive);
+        close_zip_reader(&archive);
         return false;
     }
 
     XML_Parser parser = XML_ParserCreate(nullptr); // encoding
     if (!parser) {
         printf("Couldn't allocate memory for parser\n");
-        mz_zip_reader_end(&archive);
+        close_zip_reader(&archive);
         return false;
     }
 
-    AMFParserContext ctx(parser, config, model);
+    AMFParserContext ctx(parser, config, config_substitutions, model);
     XML_SetUserData(parser, (void*)&ctx);
     XML_SetElementHandler(parser, AMFParserContext::startElement, AMFParserContext::endElement);
     XML_SetCharacterDataHandler(parser, AMFParserContext::characters);
 
-    void* parser_buffer = XML_GetBuffer(parser, (int)stat.m_uncomp_size);
-    if (parser_buffer == nullptr)
+    struct CallbackData
     {
-        printf("Unable to create buffer\n");
-        mz_zip_reader_end(&archive);
+        XML_Parser& parser;
+        AMFParserContext& ctx;
+        const mz_zip_archive_file_stat& stat;
+
+        CallbackData(XML_Parser& parser, AMFParserContext& ctx, const mz_zip_archive_file_stat& stat) : parser(parser), ctx(ctx), stat(stat) {}
+    };
+
+    CallbackData data(parser, ctx, stat);
+
+    mz_bool res = 0;
+
+    try
+    {
+        res = mz_zip_reader_extract_file_to_callback(&archive, stat.m_filename, [](void* pOpaque, mz_uint64 file_ofs, const void* pBuf, size_t n)->size_t {
+            CallbackData* data = (CallbackData*)pOpaque;
+            if (!XML_Parse(data->parser, (const char*)pBuf, (int)n, (file_ofs + n == data->stat.m_uncomp_size) ? 1 : 0) || data->ctx.error())
+            {
+                char error_buf[1024];
+                ::sprintf(error_buf, "Error (%s) while parsing '%s' at line %d", data->ctx.error_message(), data->stat.m_filename, (int)XML_GetCurrentLineNumber(data->parser));
+                throw Slic3r::FileIOError(error_buf);
+            }
+
+            return n;
+            }, &data, 0);
+    }
+    catch (std::exception& e)
+    {
+        printf("%s\n", e.what());
+        close_zip_reader(&archive);
         return false;
     }
 
-    mz_bool res = mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, parser_buffer, (size_t)stat.m_uncomp_size, 0);
     if (res == 0)
     {
-        printf("Error while reading model data to buffer\n");
-        mz_zip_reader_end(&archive);
-        return false;
-    }
-
-    if (!XML_ParseBuffer(parser, (int)stat.m_uncomp_size, 1))
-    {
-        printf("Error (%s) while parsing xml file at line %d\n", XML_ErrorString(XML_GetErrorCode(parser)), XML_GetCurrentLineNumber(parser));
-        mz_zip_reader_end(&archive);
+        printf("Error while extracting model data from zip archive");
+        close_zip_reader(&archive);
         return false;
     }
 
     ctx.endDocument();
 
-    version = ctx.m_version;
+    if (check_version && (ctx.m_version > VERSION_AMF_COMPATIBLE))
+    {
+        // std::string msg = _(L("The selected amf file has been saved with a newer version of " + std::string(SLIC3R_APP_NAME) + " and is not compatible."));
+        // throw Slic3r::FileIOError(msg.c_str());
+        const std::string msg = (boost::format(_(L("The selected amf file has been saved with a newer version of %1% and is not compatible."))) % std::string(SLIC3R_APP_NAME)).str();
+        throw Slic3r::FileIOError(msg);
+    }
 
     return true;
 }
 
 // Load an AMF archive into a provided model.
-bool load_amf_archive(const char *path, DynamicPrintConfig *config, Model *model)
+bool load_amf_archive(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version)
 {
     if ((path == nullptr) || (model == nullptr))
         return false;
 
-    unsigned int version = 0;
-
     mz_zip_archive archive;
     mz_zip_zero_struct(&archive);
 
-    mz_bool res = mz_zip_reader_init_file(&archive, path, 0);
-    if (res == 0)
+    if (!open_zip_reader(&archive, path))
     {
         printf("Unable to init zip reader\n");
         return false;
@@ -788,11 +1008,20 @@ bool load_amf_archive(const char *path, DynamicPrintConfig *config, Model *model
         {
             if (boost::iends_with(stat.m_filename, ".amf"))
             {
-                if (!extract_model_from_archive(archive, stat, config, model, version))
+                try
                 {
-                    mz_zip_reader_end(&archive);
-                    printf("Archive does not contain a valid model");
-                    return false;
+                    if (!extract_model_from_archive(archive, stat, config, config_substitutions, model, check_version))
+                    {
+                        close_zip_reader(&archive);
+                        printf("Archive does not contain a valid model");
+                        return false;
+                    }
+                }
+                catch (const std::exception& e)
+                {
+                    // ensure the zip archive is closed and rethrow the exception
+                    close_zip_reader(&archive);
+                    throw Slic3r::FileIOError(e.what());
                 }
 
                 break;
@@ -811,17 +1040,23 @@ bool load_amf_archive(const char *path, DynamicPrintConfig *config, Model *model
     }
 #endif // forward compatibility
 
-    mz_zip_reader_end(&archive);
+    close_zip_reader(&archive);
+
+    for (ModelObject *o : model->objects)
+        for (ModelVolume *v : o->volumes)
+            if (v->source.input_file.empty() && (v->type() == ModelVolumeType::MODEL_PART))
+                v->source.input_file = path;
+
     return true;
 }
 
 // Load an AMF file into a provided model.
 // If config is not a null pointer, updates it if the amf file/archive contains config data
-bool load_amf(const char *path, DynamicPrintConfig *config, Model *model)
+bool load_amf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version)
 {
     if (boost::iends_with(path, ".amf.xml"))
         // backward compatibility with older slic3r output
-        return load_amf_file(path, config, model);
+        return load_amf_file(path, config, config_substitutions, model);
     else if (boost::iends_with(path, ".amf"))
     {
         boost::nowide::ifstream file(path, boost::nowide::ifstream::binary);
@@ -829,16 +1064,16 @@ bool load_amf(const char *path, DynamicPrintConfig *config, Model *model)
             return false;
 
         std::string zip_mask(2, '\0');
-        file.read(const_cast<char*>(zip_mask.data()), 2);
+        file.read(zip_mask.data(), 2);
         file.close();
 
-        return (zip_mask == "PK") ? load_amf_archive(path, config, model) : load_amf_file(path, config, model);
+        return (zip_mask == "PK") ? load_amf_archive(path, config, config_substitutions, model, check_version) : load_amf_file(path, config, config_substitutions, model);
     }
     else
         return false;
 }
 
-bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
+bool store_amf(const char* path, Model* model, const DynamicPrintConfig* config, bool fullpath_sources)
 {
     if ((path == nullptr) || (model == nullptr))
         return false;
@@ -851,11 +1086,14 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
     mz_zip_archive archive;
     mz_zip_zero_struct(&archive);
 
-    mz_bool res = mz_zip_writer_init_file(&archive, export_path.c_str(), 0);
-    if (res == 0)
-        return false;
+    if (!open_zip_writer(&archive, export_path)) return false;
 
     std::stringstream stream;
+    // https://en.cppreference.com/w/cpp/types/numeric_limits/max_digits10
+    // Conversion of a floating-point value to text and back is exact as long as at least max_digits10 were used (9 for float, 17 for double).
+    // It is guaranteed to produce the same floating-point value, even though the intermediate text representation is not exact.
+    // The default value of std::stream precision is 6 digits only!
+    stream << std::setprecision(std::numeric_limits<float>::max_digits10);
     stream << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
     stream << "<amf unit=\"millimeter\">\n";
     stream << "<metadata type=\"cad\">Slic3r " << SLIC3R_VERSION << "</metadata>\n";
@@ -866,7 +1104,7 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
         std::string str_config = "\n";
         for (const std::string &key : config->keys())
             if (key != "compatible_printers")
-                str_config += "; " + key + " = " + config->serialize(key) + "\n";
+                str_config += "; " + key + " = " + config->opt_serialize(key) + "\n";
         stream << "<metadata type=\"" << SLIC3R_CONFIG_TYPE << "\">" << xml_escape(str_config) << "</metadata>\n";
     }
 
@@ -878,7 +1116,7 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
         for (const auto &attr : material.second->attributes)
             stream << "    <metadata type=\"" << attr.first << "\">" << attr.second << "</metadata>\n";
         for (const std::string &key : material.second->config.keys())
-            stream << "    <metadata type=\"slic3r." << key << "\">" << material.second->config.serialize(key) << "</metadata>\n";
+            stream << "    <metadata type=\"slic3r." << key << "\">" << material.second->config.opt_serialize(key) << "</metadata>\n";
         stream << "  </material>\n";
     }
     std::string instances;
@@ -886,28 +1124,51 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
         ModelObject *object = model->objects[object_id];
         stream << "  <object id=\"" << object_id << "\">\n";
         for (const std::string &key : object->config.keys())
-            stream << "    <metadata type=\"slic3r." << key << "\">" << object->config.serialize(key) << "</metadata>\n";
+            stream << "    <metadata type=\"slic3r." << key << "\">" << object->config.opt_serialize(key) << "</metadata>\n";
         if (!object->name.empty())
             stream << "    <metadata type=\"name\">" << xml_escape(object->name) << "</metadata>\n";
-        const std::vector<double> &layer_height_profile = object->layer_height_profile;
+        const std::vector<double> &layer_height_profile = object->layer_height_profile.get();
         if (layer_height_profile.size() >= 4 && (layer_height_profile.size() % 2) == 0) {
             // Store the layer height profile as a single semicolon separated list.
             stream << "    <metadata type=\"slic3r.layer_height_profile\">";
             stream << layer_height_profile.front();
             for (size_t i = 1; i < layer_height_profile.size(); ++i)
                 stream << ";" << layer_height_profile[i];
-                stream << "\n    </metadata>\n";
+            stream << "\n    </metadata>\n";
         }
-        //FIXME Store the layer height ranges (ModelObject::layer_height_ranges)
 
-        const std::vector<Vec3f>& sla_support_points = object->sla_support_points;
+        // Export layer height ranges including the layer range specific config overrides.
+        const t_layer_config_ranges& config_ranges = object->layer_config_ranges;
+        if (!config_ranges.empty())
+        {
+            // Store the layer config range as a single semicolon separated list.
+            stream << "    <layer_config_ranges>\n";
+            size_t layer_counter = 0;
+            for (const auto &range : config_ranges) {
+                stream << "      <range id=\"" << layer_counter << "\">\n";
+
+                stream << "        <metadata type=\"slic3r.layer_height_range\">";
+                stream << range.first.first << ";" << range.first.second << "</metadata>\n";
+
+                for (const std::string& key : range.second.keys())
+                    stream << "        <metadata type=\"slic3r." << key << "\">" << range.second.opt_serialize(key) << "</metadata>\n";
+
+                stream << "      </range>\n";
+                layer_counter++;
+            }
+
+            stream << "    </layer_config_ranges>\n";
+        }
+
+
+        const std::vector<sla::SupportPoint>& sla_support_points = object->sla_support_points;
         if (!sla_support_points.empty()) {
             // Store the SLA supports as a single semicolon separated list.
             stream << "    <metadata type=\"slic3r.sla_support_points\">";
             for (size_t i = 0; i < sla_support_points.size(); ++i) {
                 if (i != 0)
                     stream << ";";
-                stream << sla_support_points[i](0) << ";" << sla_support_points[i](1) << ";" << sla_support_points[i](2);
+                stream << sla_support_points[i].pos(0) << ";" << sla_support_points[i].pos(1) << ";" << sla_support_points[i].pos(2) << ";" << sla_support_points[i].head_front_radius << ";" << sla_support_points[i].is_new_island;
             }
             stream << "\n    </metadata>\n";
         }
@@ -918,23 +1179,23 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
         int              num_vertices = 0;
         for (ModelVolume *volume : object->volumes) {
             vertices_offsets.push_back(num_vertices);
-            if (! volume->mesh.repaired) 
-                throw std::runtime_error("store_amf() requires repair()");
-            auto &stl = volume->mesh.stl;
-            if (stl.v_shared == nullptr)
-                stl_generate_shared_vertices(&stl);
+            if (! volume->mesh().repaired)
+                throw Slic3r::FileIOError("store_amf() requires repair()");
+			if (! volume->mesh().has_shared_vertices())
+				throw Slic3r::FileIOError("store_amf() requires shared vertices");
+            const indexed_triangle_set &its = volume->mesh().its;
             const Transform3d& matrix = volume->get_matrix();
-            for (size_t i = 0; i < stl.stats.shared_vertices; ++i) {
+            for (size_t i = 0; i < its.vertices.size(); ++i) {
                 stream << "         <vertex>\n";
                 stream << "           <coordinates>\n";
-                Vec3d v = matrix * stl.v_shared[i].cast<double>();
+                Vec3f v = (matrix * its.vertices[i].cast<double>()).cast<float>();
                 stream << "             <x>" << v(0) << "</x>\n";
                 stream << "             <y>" << v(1) << "</y>\n";
                 stream << "             <z>" << v(2) << "</z>\n";
                 stream << "           </coordinates>\n";
                 stream << "         </vertex>\n";
             }
-            num_vertices += stl.stats.shared_vertices;
+            num_vertices += (int)its.vertices.size();
         }
         stream << "      </vertices>\n";
         for (size_t i_volume = 0; i_volume < object->volumes.size(); ++i_volume) {
@@ -945,16 +1206,43 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
             else
                 stream << "      <volume materialid=\"" << volume->material_id() << "\">\n";
             for (const std::string &key : volume->config.keys())
-                stream << "        <metadata type=\"slic3r." << key << "\">" << volume->config.serialize(key) << "</metadata>\n";
+                stream << "        <metadata type=\"slic3r." << key << "\">" << volume->config.opt_serialize(key) << "</metadata>\n";
             if (!volume->name.empty())
                 stream << "        <metadata type=\"name\">" << xml_escape(volume->name) << "</metadata>\n";
             if (volume->is_modifier())
                 stream << "        <metadata type=\"slic3r.modifier\">1</metadata>\n";
             stream << "        <metadata type=\"slic3r.volume_type\">" << ModelVolume::type_to_string(volume->type()) << "</metadata>\n";
-            for (int i = 0; i < (int)volume->mesh.stl.stats.number_of_facets; ++i) {
+            stream << "        <metadata type=\"slic3r.matrix\">";
+            const Transform3d& matrix = volume->get_matrix() * volume->source.transform.get_matrix();
+            stream << std::setprecision(std::numeric_limits<double>::max_digits10);
+            for (int r = 0; r < 4; ++r)
+            {
+                for (int c = 0; c < 4; ++c)
+                {
+                    stream << matrix(r, c);
+                    if ((r != 3) || (c != 3))
+                        stream << " ";
+                }
+            }
+            stream << "</metadata>\n";
+            if (!volume->source.input_file.empty())
+            {
+                std::string input_file = xml_escape(fullpath_sources ? volume->source.input_file : boost::filesystem::path(volume->source.input_file).filename().string());
+                stream << "        <metadata type=\"slic3r.source_file\">" << input_file << "</metadata>\n";
+                stream << "        <metadata type=\"slic3r.source_object_id\">" << volume->source.object_idx << "</metadata>\n";
+                stream << "        <metadata type=\"slic3r.source_volume_id\">" << volume->source.volume_idx << "</metadata>\n";
+                stream << "        <metadata type=\"slic3r.source_offset_x\">" << volume->source.mesh_offset(0) << "</metadata>\n";
+                stream << "        <metadata type=\"slic3r.source_offset_y\">" << volume->source.mesh_offset(1) << "</metadata>\n";
+                stream << "        <metadata type=\"slic3r.source_offset_z\">" << volume->source.mesh_offset(2) << "</metadata>\n";
+            }
+            if (volume->source.is_converted_from_inches)
+                stream << "        <metadata type=\"slic3r.source_in_inches\">1</metadata>\n";
+			stream << std::setprecision(std::numeric_limits<float>::max_digits10);
+            const indexed_triangle_set &its = volume->mesh().its;
+            for (size_t i = 0; i < its.indices.size(); ++i) {
                 stream << "        <triangle>\n";
                 for (int j = 0; j < 3; ++j)
-                stream << "          <v" << j + 1 << ">" << volume->mesh.stl.v_indices[i].vertex[j] + vertices_offset << "</v" << j + 1 << ">\n";
+                stream << "          <v" << j + 1 << ">" << its.indices[i][j] + vertices_offset << "</v" << j + 1 << ">\n";
                 stream << "        </triangle>\n";
             }
             stream << "      </volume>\n";
@@ -965,7 +1253,7 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
             for (ModelInstance *instance : object->instances) {
                 char buf[512];
                 sprintf(buf,
-                    "    <instance objectid=\"" PRINTF_ZU "\">\n"
+                    "    <instance objectid=\"%zu\">\n"
                     "      <deltax>%lf</deltax>\n"
                     "      <deltay>%lf</deltay>\n"
                     "      <deltaz>%lf</deltaz>\n"
@@ -978,6 +1266,7 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
                     "      <mirrorx>%lf</mirrorx>\n"
                     "      <mirrory>%lf</mirrory>\n"
                     "      <mirrorz>%lf</mirrorz>\n"
+                    "      <printable>%d</printable>\n"
                     "    </instance>\n",
                     object_id,
                     instance->get_offset(X),
@@ -991,7 +1280,8 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
                     instance->get_scaling_factor(Z),
                     instance->get_mirror(X),
                     instance->get_mirror(Y),
-                    instance->get_mirror(Z));
+                    instance->get_mirror(Z),
+                    instance->printable);
 
                 //FIXME missing instance->scaling_factor
                 instances.append(buf);
@@ -1003,6 +1293,58 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
         stream << instances;
         stream << "  </constellation>\n";
     }
+
+    if (!model->custom_gcode_per_print_z.gcodes.empty())
+    {
+        std::string out = "";
+        pt::ptree tree;
+
+        pt::ptree& main_tree = tree.add("custom_gcodes_per_height", "");
+
+        for (const CustomGCode::Item& code : model->custom_gcode_per_print_z.gcodes)
+        {
+            pt::ptree& code_tree = main_tree.add("code", "");
+            // store custom_gcode_per_print_z gcodes information 
+            code_tree.put("<xmlattr>.print_z"   , code.print_z  );
+            code_tree.put("<xmlattr>.type"      , static_cast<int>(code.type));
+            code_tree.put("<xmlattr>.extruder"  , code.extruder );
+            code_tree.put("<xmlattr>.color"     , code.color    );
+            code_tree.put("<xmlattr>.extra"     , code.extra    );
+
+            // add gcode field data for the old version of the PrusaSlicer
+            std::string gcode = code.type == CustomGCode::ColorChange ? config->opt_string("color_change_gcode")    :
+                                code.type == CustomGCode::PausePrint  ? config->opt_string("pause_print_gcode")     :
+                                code.type == CustomGCode::Template    ? config->opt_string("template_custom_gcode") :
+                                code.type == CustomGCode::ToolChange  ? "tool_change"   : code.extra; 
+            code_tree.put("<xmlattr>.gcode"     , gcode   );
+        }
+
+        pt::ptree& mode_tree = main_tree.add("mode", "");
+        // store mode of a custom_gcode_per_print_z 
+        mode_tree.put("<xmlattr>.value", 
+                      model->custom_gcode_per_print_z.mode == CustomGCode::Mode::SingleExtruder ? CustomGCode::SingleExtruderMode : 
+                      model->custom_gcode_per_print_z.mode == CustomGCode::Mode::MultiAsSingle  ?
+                      CustomGCode::MultiAsSingleMode  : CustomGCode::MultiExtruderMode);
+
+        if (!tree.empty())
+        {
+            std::ostringstream oss;
+            pt::write_xml(oss, tree);
+            out = oss.str();
+
+            size_t del_header_pos = out.find("<custom_gcodes_per_height");
+            if (del_header_pos != std::string::npos)
+                out.erase(out.begin(), out.begin() + del_header_pos);
+
+            // Post processing("beautification") of the output string
+            boost::replace_all(out, "><code", ">\n  <code");
+            boost::replace_all(out, "><mode", ">\n  <mode");
+            boost::replace_all(out, "><", ">\n<");
+
+            stream << out << "\n";
+        }
+    }
+
     stream << "</amf>\n";
 
     std::string internal_amf_filename = boost::ireplace_last_copy(boost::filesystem::path(export_path).filename().string(), ".zip.amf", ".amf");
@@ -1010,19 +1352,19 @@ bool store_amf(const char *path, Model *model, const DynamicPrintConfig *config)
 
     if (!mz_zip_writer_add_mem(&archive, internal_amf_filename.c_str(), (const void*)out.data(), out.length(), MZ_DEFAULT_COMPRESSION))
     {
-        mz_zip_writer_end(&archive);
+        close_zip_writer(&archive);
         boost::filesystem::remove(export_path);
         return false;
     }
 
     if (!mz_zip_writer_finalize_archive(&archive))
     {
-        mz_zip_writer_end(&archive);
+        close_zip_writer(&archive);
         boost::filesystem::remove(export_path);
         return false;
     }
 
-    mz_zip_writer_end(&archive);
+    close_zip_writer(&archive);
 
     return true;
 }

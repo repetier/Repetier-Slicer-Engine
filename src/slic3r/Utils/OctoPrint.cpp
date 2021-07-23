@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <sstream>
+#include <exception>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -10,8 +11,8 @@
 
 #include <wx/progdlg.h>
 
-#include "libslic3r/PrintConfig.hpp"
 #include "slic3r/GUI/I18N.hpp"
+#include "slic3r/GUI/GUI.hpp"
 #include "Http.hpp"
 
 
@@ -27,27 +28,29 @@ OctoPrint::OctoPrint(DynamicPrintConfig *config) :
     cafile(config->opt_string("printhost_cafile"))
 {}
 
-OctoPrint::~OctoPrint() {}
+const char* OctoPrint::get_name() const { return "OctoPrint"; }
 
 bool OctoPrint::test(wxString &msg) const
 {
     // Since the request is performed synchronously here,
     // it is ok to refer to `msg` from within the closure
 
+    const char *name = get_name();
+
     bool res = true;
     auto url = make_url("api/version");
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("Octoprint: Get version at: %1%") % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
 
     auto http = Http::get(std::move(url));
     set_auth(http);
     http.on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("Octoprint: Error getting version: %1%, HTTP %2%, body: `%3%`") % error % status % body;
+            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
             res = false;
             msg = format_error(body, error, status);
         })
         .on_complete([&, this](std::string body, unsigned) {
-            BOOST_LOG_TRIVIAL(debug) << boost::format("Octoprint: Got version: %1%") % body;
+            BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: Got version: %2%") % name % body;
 
             try {
                 std::stringstream ss(body);
@@ -62,10 +65,10 @@ bool OctoPrint::test(wxString &msg) const
                 const auto text = ptree.get_optional<std::string>("text");
                 res = validate_version_text(text);
                 if (! res) {
-                    msg = wxString::Format(_(L("Mismatched type of print host: %s")), text ? *text : "OctoPrint");
+                    msg = GUI::from_u8((boost::format(_utf8(L("Mismatched type of print host: %s"))) % (text ? *text : "OctoPrint")).str());
                 }
             }
-            catch (...) {
+            catch (const std::exception &) {
                 res = false;
                 msg = "Could not parse server response";
             }
@@ -82,12 +85,16 @@ wxString OctoPrint::get_test_ok_msg () const
 
 wxString OctoPrint::get_test_failed_msg (wxString &msg) const
 {
-    return wxString::Format("%s: %s\n\n%s",
-        _(L("Could not connect to OctoPrint")), msg, _(L("Note: OctoPrint version at least 1.1.0 is required.")));
+    return GUI::from_u8((boost::format("%s: %s\n\n%s")
+        % _utf8(L("Could not connect to OctoPrint"))
+        % std::string(msg.ToUTF8())
+        % _utf8(L("Note: OctoPrint version at least 1.1.0 is required."))).str());
 }
 
 bool OctoPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn) const
 {
+    const char *name = get_name();
+
     const auto upload_filename = upload_data.upload_path.filename();
     const auto upload_parent_path = upload_data.upload_path.parent_path();
 
@@ -101,7 +108,8 @@ bool OctoPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Erro
 
     auto url = make_url("api/files/local");
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("Octoprint: Uploading file %1% at %2%, filename: %3%, path: %4%, print: %5%")
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2% at %3%, filename: %4%, path: %5%, print: %6%")
+        % name
         % upload_data.source_path
         % url
         % upload_filename.string()
@@ -114,10 +122,10 @@ bool OctoPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Erro
         .form_add("path", upload_parent_path.string())      // XXX: slashes on windows ???
         .form_add_file("file", upload_data.source_path.string(), upload_filename.string())
         .on_complete([&](std::string body, unsigned status) {
-            BOOST_LOG_TRIVIAL(debug) << boost::format("Octoprint: File uploaded: HTTP %1%: %2%") % status % body;
+            BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: File uploaded: HTTP %2%: %3%") % name % status % body;
         })
         .on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("Octoprint: Error uploading file: %1%, HTTP %2%, body: `%3%`") % error % status % body;
+            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading file: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
             error_fn(format_error(body, error, status));
             res = false;
         })
@@ -132,16 +140,6 @@ bool OctoPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Erro
         .perform_sync();
 
     return res;
-}
-
-bool OctoPrint::has_auto_discovery() const
-{
-    return true;
-}
-
-bool OctoPrint::can_test() const
-{
-    return true;
 }
 
 bool OctoPrint::validate_version_text(const boost::optional<std::string> &version_text) const
@@ -171,25 +169,92 @@ std::string OctoPrint::make_url(const std::string &path) const
     }
 }
 
-
-// SLAHost
-
-SLAHost::~SLAHost() {}
-
-wxString SLAHost::get_test_ok_msg () const
+SL1Host::SL1Host(DynamicPrintConfig *config) : 
+    OctoPrint(config),
+    authorization_type(dynamic_cast<const ConfigOptionEnum<AuthorizationType>*>(config->option("printhost_authorization_type"))->value),
+    username(config->opt_string("printhost_user")),
+    password(config->opt_string("printhost_password"))
 {
-    return _(L("Connection to Prusa SLA works correctly."));
 }
 
-wxString SLAHost::get_test_failed_msg (wxString &msg) const
+// SL1Host
+const char* SL1Host::get_name() const { return "SL1Host"; }
+
+wxString SL1Host::get_test_ok_msg () const
 {
-    return wxString::Format("%s: %s", _(L("Could not connect to Prusa SLA")), msg);
+    return _(L("Connection to Prusa SL1 / SL1S works correctly."));
 }
 
-bool SLAHost::validate_version_text(const boost::optional<std::string> &version_text) const
+wxString SL1Host::get_test_failed_msg (wxString &msg) const
+{
+    return GUI::from_u8((boost::format("%s: %s")
+                    % _utf8(L("Could not connect to Prusa SLA"))
+                    % std::string(msg.ToUTF8())).str());
+}
+
+bool SL1Host::validate_version_text(const boost::optional<std::string> &version_text) const
 {
     return version_text ? boost::starts_with(*version_text, "Prusa SLA") : false;
 }
 
+void SL1Host::set_auth(Http &http) const
+{
+    switch (authorization_type) {
+    case atKeyPassword:
+        http.header("X-Api-Key", get_apikey());
+        break;
+    case atUserPassword:
+        http.auth_digest(username, password);
+        break;
+    }
+
+    if (! get_cafile().empty()) {
+        http.ca_file(get_cafile());
+    }
+}
+
+// PrusaLink
+PrusaLink::PrusaLink(DynamicPrintConfig* config) :
+    OctoPrint(config),
+    authorization_type(dynamic_cast<const ConfigOptionEnum<AuthorizationType>*>(config->option("printhost_authorization_type"))->value),
+    username(config->opt_string("printhost_user")),
+    password(config->opt_string("printhost_password"))
+{
+}
+
+const char* PrusaLink::get_name() const { return "PrusaLink"; }
+
+wxString PrusaLink::get_test_ok_msg() const
+{
+    return _(L("Connection to PrusaLink works correctly."));
+}
+
+wxString PrusaLink::get_test_failed_msg(wxString& msg) const
+{
+    return GUI::from_u8((boost::format("%s: %s")
+        % _utf8(L("Could not connect to PrusaLink"))
+        % std::string(msg.ToUTF8())).str());
+}
+
+bool PrusaLink::validate_version_text(const boost::optional<std::string>& version_text) const
+{
+    return version_text ? (boost::starts_with(*version_text, "PrusaLink") || boost::starts_with(*version_text, "OctoPrint")) : false;
+}
+
+void PrusaLink::set_auth(Http& http) const
+{
+    switch (authorization_type) {
+    case atKeyPassword:
+        http.header("X-Api-Key", get_apikey());
+        break;
+    case atUserPassword:
+        http.auth_digest(username, password);
+        break;
+    }
+
+    if (!get_cafile().empty()) {
+        http.ca_file(get_cafile());
+    }
+}
 
 }

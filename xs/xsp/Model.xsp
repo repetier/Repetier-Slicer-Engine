@@ -3,6 +3,7 @@
 %{
 #include <xsinit.h>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Slicing.hpp"
@@ -11,7 +12,7 @@
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/PRUS.hpp"
 #include "libslic3r/Format/STL.hpp"
-#include "slic3r/GUI/PresetBundle.hpp"
+#include "libslic3r/PresetBundle.hpp"
 %}
 
 %name{Slic3r::Model} class Model {
@@ -21,7 +22,7 @@
     %name{read_from_file} Model(std::string input_file, bool add_default_instances = true)
         %code%{
             try {
-                RETVAL = new Model(Model::read_from_file(input_file, nullptr, add_default_instances));
+                RETVAL = new Model(Model::read_from_file(input_file, nullptr, nullptr, only_if(add_default_instances, Model::LoadAttribute::AddDefaultInstances)));
             } catch (std::exception& e) {
                 croak("Error while opening %s: %s\n", input_file.c_str(), e.what());
             }
@@ -80,9 +81,9 @@
     ModelObjectPtrs* objects()
         %code%{ RETVAL = &THIS->objects; %};
     
-    bool arrange_objects(double dist, BoundingBoxf* bb = NULL);
-    void duplicate(unsigned int copies_num, double dist, BoundingBoxf* bb = NULL);
-    void duplicate_objects(unsigned int copies_num, double dist, BoundingBoxf* bb = NULL);
+    bool arrange_objects(double dist, BoundingBoxf* bb = NULL) %code%{ ArrangeParams ap{scaled(dist)}; if (bb) arrange_objects(*THIS, scaled(*bb), ap); else arrange_objects(*THIS, InfiniteBed{}, ap); %};
+    void duplicate(unsigned int copies_num, double dist, BoundingBoxf* bb = NULL) %code%{ ArrangeParams ap{scaled(dist)}; if (bb) duplicate(*THIS, copies_num, scaled(*bb), ap); else duplicate(*THIS, copies_num, InfiniteBed{}, ap); %};
+    void duplicate_objects(unsigned int copies_num, double dist, BoundingBoxf* bb = NULL) %code%{ ArrangeParams ap{scaled(dist)}; if (bb) duplicate_objects(*THIS, copies_num, scaled(*bb), ap); else duplicate_objects(*THIS, copies_num, InfiniteBed{}, ap); %};
     void duplicate_objects_grid(unsigned int x, unsigned int y, double dist);
 
     bool looks_like_multipart_object() const;
@@ -117,7 +118,7 @@ load_stl(CLASS, path, object_name)
         %code%{ RETVAL = THIS->get_model(); %};
 
     Ref<DynamicPrintConfig> config()
-        %code%{ RETVAL = &THIS->config; %};
+        %code%{ RETVAL = &const_cast<DynamicPrintConfig&>(THIS->config.get()); %};
     
     std::string get_attribute(std::string name)
         %code%{ if (THIS->attributes.find(name) != THIS->attributes.end()) RETVAL = THIS->attributes[name]; %};
@@ -201,21 +202,17 @@ ModelMaterial::attributes()
     void set_input_file(std::string value)
         %code%{ THIS->input_file = value; %};
     Ref<DynamicPrintConfig> config()
-        %code%{ RETVAL = &THIS->config; %};
+        %code%{ RETVAL = &const_cast<DynamicPrintConfig&>(THIS->config.get()); %};
 
     Ref<Model> model()
         %code%{ RETVAL = THIS->get_model(); %};
-
-    t_layer_height_ranges layer_height_ranges()
-        %code%{ RETVAL = THIS->layer_height_ranges; %};
-    void set_layer_height_ranges(t_layer_height_ranges ranges)
-        %code%{ THIS->layer_height_ranges = ranges; %};
 
     Ref<Vec3d> origin_translation()
         %code%{ RETVAL = &THIS->origin_translation; %};
     void set_origin_translation(Vec3d* point)
         %code%{ THIS->origin_translation = *point; %};
     
+    void ensure_on_bed();
     bool needed_repair() const;
     int materials_count() const;
     int facets_count();
@@ -251,24 +248,24 @@ ModelMaterial::attributes()
     Ref<ModelMaterial> material();
     
     Ref<DynamicPrintConfig> config()
-        %code%{ RETVAL = &THIS->config; %};
+        %code%{ RETVAL = &const_cast<DynamicPrintConfig&>(THIS->config.get()); %};
     Ref<TriangleMesh> mesh()
-        %code%{ RETVAL = &THIS->mesh; %};
+        %code%{ RETVAL = &THIS->mesh(); %};
     
     bool modifier()
         %code%{ RETVAL = THIS->is_modifier(); %};
     void set_modifier(bool modifier)
-        %code%{ THIS->set_type(modifier ? ModelVolume::PARAMETER_MODIFIER : ModelVolume::MODEL_PART); %};
+        %code%{ THIS->set_type(modifier ? ModelVolumeType::PARAMETER_MODIFIER : ModelVolumeType::MODEL_PART); %};
     bool model_part()
         %code%{ RETVAL = THIS->is_model_part(); %};
     bool support_enforcer()
         %code%{ RETVAL = THIS->is_support_enforcer(); %};
     void set_support_enforcer()
-        %code%{ THIS->set_type(ModelVolume::SUPPORT_ENFORCER); %};
+        %code%{ THIS->set_type(ModelVolumeType::SUPPORT_ENFORCER); %};
     bool support_blocker()
         %code%{ RETVAL = THIS->is_support_blocker(); %};
     void set_support_blocker()
-        %code%{ THIS->set_type(ModelVolume::SUPPORT_BLOCKER); %};
+        %code%{ THIS->set_type(ModelVolumeType::SUPPORT_BLOCKER); %};
 
     size_t split(unsigned int max_extruders);
 };

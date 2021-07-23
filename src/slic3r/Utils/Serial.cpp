@@ -1,11 +1,14 @@
 #include "Serial.hpp"
 
+#include "libslic3r/Exception.hpp"
+
 #include <algorithm>
 #include <string>
 #include <vector>
 #include <chrono>
 #include <thread>
 #include <fstream>
+#include <exception>
 #include <stdexcept>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -71,13 +74,10 @@ void parse_hardware_id(const std::string &hardware_id, SerialPortInfo &spi)
 	std::regex pattern("USB\\\\.*VID_([[:xdigit:]]+)&PID_([[:xdigit:]]+).*");
 	std::smatch matches;
 	if (std::regex_match(hardware_id, matches, pattern)) {
-		try {
-			vid = std::stoul(matches[1].str(), 0, 16);
-			pid = std::stoul(matches[2].str(), 0, 16);
-			spi.id_vendor = vid;
-			spi.id_product = pid;
-		}
-		catch (...) {}
+		vid = std::stoul(matches[1].str(), 0, 16);
+		pid = std::stoul(matches[2].str(), 0, 16);
+		spi.id_vendor = vid;
+		spi.id_product = pid;
 	}
 }
 #endif
@@ -100,7 +100,7 @@ optional<unsigned long> sysfs_tty_prop_hex(const std::string &tty_dev, const std
 	if (!prop) { return boost::none; }
 
 	try { return std::stoul(*prop, 0, 16); }
-	catch (...) { return boost::none; }
+	catch (const std::exception&) { return boost::none; }
 }
 #endif
 
@@ -300,7 +300,7 @@ void Serial::set_baud_rate(unsigned baud_rate)
 
 		auto handle_errno = [](int retval) {
 			if (retval != 0) {
-				throw std::runtime_error(
+				throw Slic3r::RuntimeError(
 					(boost::format("Could not set baud rate: %1%") % strerror(errno)).str()
 				);
 			}
@@ -313,7 +313,7 @@ void Serial::set_baud_rate(unsigned baud_rate)
 		speed_t newSpeed = baud_rate;
 		handle_errno(::ioctl(handle, IOSSIOSPEED, &newSpeed));
 		handle_errno(::tcsetattr(handle, TCSANOW, &ios));
-#elif __linux
+#elif __linux__
 
 		/* The following definitions are kindly borrowed from:
 			/usr/include/asm-generic/termbits.h
@@ -348,17 +348,19 @@ void Serial::set_baud_rate(unsigned baud_rate)
 		handle_errno(::cfsetspeed(&ios, baud_rate));
 		handle_errno(::tcsetattr(handle, TCSAFLUSH, &ios));
 #else
-		throw std::runtime_error("Custom baud rates are not currently supported on this OS");
+		throw Slic3r::RuntimeError("Custom baud rates are not currently supported on this OS");
 #endif
 	}
 }
 
+
+/*
 void Serial::set_DTR(bool on)
 {
 	auto handle = native_handle();
 #if defined(_WIN32) && !defined(__SYMBIAN32__)
 	if (! EscapeCommFunction(handle, on ? SETDTR : CLRDTR)) {
-		throw std::runtime_error("Could not set serial port DTR");
+		throw Slic3r::RuntimeError("Could not set serial port DTR");
 	}
 #else
 	int status;
@@ -369,7 +371,7 @@ void Serial::set_DTR(bool on)
 		}
 	}
 
-	throw std::runtime_error(
+	throw Slic3r::RuntimeError(
 		(boost::format("Could not set serial port DTR: %1%") % strerror(errno)).str()
 	);
 #endif
@@ -384,7 +386,13 @@ void Serial::reset_line_num()
 
 bool Serial::read_line(unsigned timeout, std::string &line, error_code &ec)
 {
-	auto &io_service = get_io_service();
+	auto& io_service =
+#if BOOST_VERSION >= 107000
+		//FIXME this is most certainly wrong!
+		(boost::asio::io_context&)this->get_executor().context();
+ #else
+		this->get_io_service();
+#endif
 	asio::deadline_timer timer(io_service);
 	char c = 0;
 	bool fail = false;
@@ -489,6 +497,7 @@ std::string Serial::printer_format_line(const std::string &line, unsigned line_n
 
 	return (boost::format("N%1% %2%*%3%\n") % line_num_str % line % checksum).str();
 }
+*/
 
 
 } // namespace Utils

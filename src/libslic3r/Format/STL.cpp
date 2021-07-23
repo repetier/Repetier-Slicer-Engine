@@ -17,8 +17,7 @@ namespace Slic3r {
 bool load_stl(const char *path, Model *model, const char *object_name_in)
 {
     TriangleMesh mesh;
-    mesh.ReadSTLFile(path);
-    if (mesh.stl.error) {
+    if (! mesh.ReadSTLFile(path)) {
 //    die "Failed to open $file\n" if !-e $path;
         return false;
     }
@@ -52,6 +51,12 @@ bool store_stl(const char *path, TriangleMesh *mesh, bool binary)
 bool store_stl(const char *path, ModelObject *model_object, bool binary)
 {
     TriangleMesh mesh = model_object->mesh();
+    return store_stl(path, &mesh, binary);
+}
+
+bool store_stl(const char *path, Model *model, bool binary)
+{
+    TriangleMesh mesh = model->mesh();
     return store_stl(path, &mesh, binary);
 }
 

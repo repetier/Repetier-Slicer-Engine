@@ -55,7 +55,7 @@ void avrdude_cancel();
 #define MSG_TRACE   (4) /* displayed with -vvvv, show trace commuication */
 #define MSG_TRACE2  (5) /* displayed with -vvvvv */
 
-int avrdude_main(int argc, char * argv [], const char *sys_config);
+int avrdude_main(int argc, char * argv []);
 
 #if defined(WIN32NATIVE)
 
@@ -63,6 +63,8 @@ int avrdude_main(int argc, char * argv [], const char *sys_config);
 
 #include <windows.h>
 #include <unistd.h>
+
+#define strdup _strdup
 
 #ifdef UNICODE
 #error "UNICODE should not be defined for avrdude bits on Windows"

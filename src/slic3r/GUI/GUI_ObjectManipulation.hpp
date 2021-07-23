@@ -4,55 +4,75 @@
 #include <memory>
 
 #include "GUI_ObjectSettings.hpp"
-#include "GLCanvas3D.hpp"
+#include "libslic3r/Point.hpp"
+#include <float.h>
 
+class wxBitmapComboBox;
 class wxStaticText;
-class PrusaLockButton;
+class LockButton;
+class wxStaticBitmap;
+class wxCheckBox;
 
 namespace Slic3r {
 namespace GUI {
 
+class Selection;
+
+class ObjectManipulation;
+class ManipulationEditor : public wxTextCtrl
+{
+    std::string         m_opt_key;
+    int                 m_axis;
+    bool                m_enter_pressed { false };
+    wxString            m_valid_value {wxEmptyString};
+
+    std::string         m_full_opt_name;
+
+public:
+    ManipulationEditor(ObjectManipulation* parent, const std::string& opt_key, int axis);
+    ~ManipulationEditor() {}
+
+    void                msw_rescale();
+    void                set_value(const wxString& new_value);
+    void                kill_focus(ObjectManipulation *parent);
+
+private:
+    double              get_value();
+};
+
 
 class ObjectManipulation : public OG_Settings
 {
+public:
+    static const double in_to_mm;
+    static const double mm_to_in;
+
+private:
     struct Cache
     {
         Vec3d position;
+        Vec3d position_rounded;
         Vec3d rotation;
+        Vec3d rotation_rounded;
         Vec3d scale;
+        Vec3d scale_rounded;
         Vec3d size;
+        Vec3d size_rounded;
 
-        std::string move_label_string;
-        std::string rotate_label_string;
-        std::string scale_label_string;
-
-        struct Instance
-        {
-            int object_idx;
-            int instance_idx;
-            Vec3d box_size;
-
-            Instance() { reset(); }
-            void reset() { this->object_idx = -1; this->instance_idx = -1; this->box_size = Vec3d::Zero(); }
-            void set(int object_idx, int instance_idx, const Vec3d& box_size) { this->object_idx = object_idx; this->instance_idx = instance_idx; this->box_size = box_size; }
-            bool matches(int object_idx, int instance_idx) const { return (this->object_idx == object_idx) && (this->instance_idx == instance_idx); }
-            bool matches_object(int object_idx) const { return (this->object_idx == object_idx); }
-            bool matches_instance(int instance_idx) const { return (this->instance_idx == instance_idx); }
-        };
-
-        Instance instance;
+        wxString move_label_string;
+        wxString rotate_label_string;
+        wxString scale_label_string;
 
         Cache() { reset(); }
         void reset()
         {
-            position = Vec3d(DBL_MAX, DBL_MAX, DBL_MAX);
-            rotation = Vec3d(DBL_MAX, DBL_MAX, DBL_MAX);
-            scale = Vec3d(DBL_MAX, DBL_MAX, DBL_MAX);
-            size = Vec3d(DBL_MAX, DBL_MAX, DBL_MAX);
-            move_label_string = "";
-            rotate_label_string = "";
-            scale_label_string = "";
-            instance.reset();
+            position = position_rounded = Vec3d(DBL_MAX, DBL_MAX, DBL_MAX);
+            rotation = rotation_rounded = Vec3d(DBL_MAX, DBL_MAX, DBL_MAX);
+            scale = scale_rounded = Vec3d(DBL_MAX, DBL_MAX, DBL_MAX);
+            size = size_rounded = Vec3d(DBL_MAX, DBL_MAX, DBL_MAX);
+            move_label_string = wxString();
+            rotate_label_string = wxString();
+            scale_label_string = wxString();
         }
         bool is_valid() const { return position != Vec3d(DBL_MAX, DBL_MAX, DBL_MAX); }
     };
@@ -62,6 +82,33 @@ class ObjectManipulation : public OG_Settings
     wxStaticText*   m_move_Label = nullptr;
     wxStaticText*   m_scale_Label = nullptr;
     wxStaticText*   m_rotate_Label = nullptr;
+
+    bool            m_imperial_units { false };
+    wxStaticText*   m_position_unit  { nullptr };
+    wxStaticText*   m_size_unit      { nullptr };
+
+    wxStaticText*   m_item_name = nullptr;
+    wxStaticText*   m_empty_str = nullptr;
+
+    // Non-owning pointers to the reset buttons, so we can hide and show them.
+    ScalableButton* m_reset_scale_button = nullptr;
+    ScalableButton* m_reset_rotation_button = nullptr;
+    ScalableButton* m_drop_to_bed_button = nullptr;
+
+    wxCheckBox*     m_check_inch {nullptr};
+
+    // Mirroring buttons and their current state
+    enum MirrorButtonState {
+        mbHidden,
+        mbShown,
+        mbActive
+    };
+    std::array<std::pair<ScalableButton*, MirrorButtonState>, 3> m_mirror_buttons;
+
+    // Bitmaps for the mirroring buttons.
+    ScalableBitmap m_mirror_bitmap_on;
+    ScalableBitmap m_mirror_bitmap_off;
+    ScalableBitmap m_mirror_bitmap_hidden;
 
     // Needs to be updated from OnIdle?
     bool            m_dirty = false;
@@ -73,14 +120,29 @@ class ObjectManipulation : public OG_Settings
     Vec3d           m_new_rotation;
     Vec3d           m_new_scale;
     Vec3d           m_new_size;
-    bool            m_new_enabled;
+    bool            m_new_enabled {true};
     bool            m_uniform_scale {true};
-    PrusaLockButton* m_lock_bnt{ nullptr };
+    // Does the object manipulation panel work in World or Local coordinates?
+    bool            m_world_coordinates = true;
+    LockButton*     m_lock_bnt{ nullptr };
+    wxBitmapComboBox* m_word_local_combo = nullptr;
+
+    ScalableBitmap  m_manifold_warning_bmp;
+    wxStaticBitmap* m_fix_throught_netfab_bitmap;
 
 #ifndef __APPLE__
-    // Currently focused option name (empty if none)
-    std::string     m_focused_option;
+    // Currently focused editor (nullptr if none)
+    ManipulationEditor* m_focused_editor {nullptr};
 #endif // __APPLE__
+
+    wxFlexGridSizer* m_main_grid_sizer;
+    wxFlexGridSizer* m_labels_grid_sizer;
+
+    // sizers, used for msw_rescale
+    wxBoxSizer*     m_word_local_combo_sizer;
+    std::vector<wxBoxSizer*>            m_rescalable_sizers;
+
+    std::vector<ManipulationEditor*>    m_editors;
 
 public:
     ObjectManipulation(wxWindow* parent);
@@ -89,14 +151,17 @@ public:
     void        Show(const bool show) override;
     bool        IsShown() override;
     void        UpdateAndShow(const bool show) override;
+    void update_ui_from_settings();
 
-    void        update_settings_value(const GLCanvas3D::Selection& selection);
-
+    void        set_dirty() { m_dirty = true; }
 	// Called from the App to update the UI if dirty.
 	void		update_if_dirty();
 
-    void        set_uniform_scaling(const bool uniform_scale) { m_uniform_scale = uniform_scale;}
+    void        set_uniform_scaling(const bool uniform_scale);
     bool        get_uniform_scaling() const { return m_uniform_scale; }
+    // Does the object manipulation panel work in World or Local coordinates?
+    void        set_world_coordinates(const bool world_coordinates) { m_world_coordinates = world_coordinates; this->UpdateAndShow(true); }
+    bool        get_world_coordinates() const { return m_world_coordinates; }
 
     void reset_cache() { m_cache.reset(); }
 #ifndef __APPLE__
@@ -106,22 +171,32 @@ public:
     void emulate_kill_focus();
 #endif // __APPLE__
 
+    void update_item_name(const wxString &item_name);
+    void update_warning_icon_state(const wxString& tooltip);
+    void msw_rescale();
+    void sys_color_changed();
+    void on_change(const std::string& opt_key, int axis, double new_value);
+    void set_focused_editor(ManipulationEditor* focused_editor) {
+#ifndef __APPLE__
+        m_focused_editor = focused_editor;
+#endif // __APPLE__        
+    }
+
 private:
     void reset_settings_value();
+    void update_settings_value(const Selection& selection);
 
-    // update size values after scale unit changing or "gizmos"
-    void update_size_value(const Vec3d& size);
-    // update rotation value after "gizmos"
-    void update_rotation_value(const Vec3d& rotation);
+    // Show or hide scale/rotation reset buttons if needed
+    void update_reset_buttons_visibility();
+    //Show or hide mirror buttons
+    void update_mirror_buttons_visibility();
 
     // change values 
-    void    change_position_value(const Vec3d& position);
-    void    change_rotation_value(const Vec3d& rotation);
-    void    change_scale_value(const Vec3d& scale);
-    void    change_size_value(const Vec3d& size);
-
-    void on_change(const t_config_option_key& opt_key, const boost::any& value);
-    void on_fill_empty_value(const std::string& opt_key);
+    void change_position_value(int axis, double value);
+    void change_rotation_value(int axis, double value);
+    void change_scale_value(int axis, double value);
+    void change_size_value(int axis, double value);
+    void do_scale(int axis, const Vec3d &scale) const;
 };
 
 }}

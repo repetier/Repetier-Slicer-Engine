@@ -1,26 +1,22 @@
 #ifndef GEOMETRIES_NOFITPOLYGON_HPP
 #define GEOMETRIES_NOFITPOLYGON_HPP
 
-#include "geometry_traits.hpp"
 #include <algorithm>
 #include <functional>
 #include <vector>
 #include <iterator>
 
+#include <libnest2d/geometry_traits.hpp>
+
 namespace libnest2d {
 
 namespace __nfp {
 // Do not specialize this...
-template<class RawShape>
+template<class RawShape, class Unit = TCompute<RawShape>>
 inline bool _vsort(const TPoint<RawShape>& v1, const TPoint<RawShape>& v2)
 {
-    using Coord = TCoord<TPoint<RawShape>>;
-    Coord &&x1 = getX(v1), &&x2 = getX(v2), &&y1 = getY(v1), &&y2 = getY(v2);
-    auto diff = y1 - y2;
-    if(std::abs(diff) <= std::numeric_limits<Coord>::epsilon())
-        return x1 < x2;
-
-    return diff < 0;
+    Unit x1 = getX(v1), x2 = getX(v2), y1 = getY(v1), y2 = getY(v2);
+    return y1 == y2 ? x1 < x2 : y1 < y2;
 }
 
 template<class EdgeList, class RawShape, class Vertex = TPoint<RawShape>>
@@ -202,7 +198,7 @@ inline TPoint<RawShape> referenceVertex(const RawShape& sh)
  * convex as well in this case.
  *
  */
-template<class RawShape>
+template<class RawShape, class Ratio = double>
 inline NfpResult<RawShape> nfpConvexOnly(const RawShape& sh,
                                          const RawShape& other)
 {
@@ -238,12 +234,62 @@ inline NfpResult<RawShape> nfpConvexOnly(const RawShape& sh,
             ++first; ++next;
         }
     }
-
-    // Sort the edges by angle to X axis.
-    std::sort(edgelist.begin(), edgelist.end(),
-              [](const Edge& e1, const Edge& e2)
+   
+    std::sort(edgelist.begin(), edgelist.end(), 
+              [](const Edge& e1, const Edge& e2) 
     {
-        return e1.angleToXaxis() > e2.angleToXaxis();
+        Vertex ax(1, 0); // Unit vector for the X axis
+        
+        // get cectors from the edges
+        Vertex p1 = e1.second() - e1.first();
+        Vertex p2 = e2.second() - e2.first();
+
+        // Quadrant mapping array. The quadrant of a vector can be determined
+        // from the dot product of the vector and its perpendicular pair
+        // with the unit vector X axis. The products will carry the values
+        // lcos = dot(p, ax) = l * cos(phi) and
+        // lsin = -dotperp(p, ax) = l * sin(phi) where
+        // l is the length of vector p. From the signs of these values we can
+        // construct an index which has the sign of lcos as MSB and the
+        // sign of lsin as LSB. This index can be used to retrieve the actual
+        // quadrant where vector p resides using the following map:
+        // (+ is 0, - is 1)
+        // cos | sin | decimal | quadrant
+        //  +  |  +  |    0    |    0
+        //  +  |  -  |    1    |    3
+        //  -  |  +  |    2    |    1
+        //  -  |  -  |    3    |    2
+        std::array<int, 4> quadrants {0, 3, 1, 2 };
+
+        std::array<int, 2> q {0, 0}; // Quadrant indices for p1 and p2
+
+        using TDots = std::array<TCompute<Vertex>, 2>;
+        TDots lcos { pl::dot(p1, ax), pl::dot(p2, ax) };
+        TDots lsin { -pl::dotperp(p1, ax), -pl::dotperp(p2, ax) };
+
+        // Construct the quadrant indices for p1 and p2
+        for(size_t i = 0; i < 2; ++i)
+            if(lcos[i] == 0) q[i] = lsin[i] > 0 ? 1 : 3;
+            else if(lsin[i] == 0) q[i] = lcos[i] > 0 ? 0 : 2;
+            else q[i] = quadrants[((lcos[i] < 0) << 1) + (lsin[i] < 0)];
+            
+        if(q[0] == q[1]) { // only bother if p1 and p2 are in the same quadrant
+            auto lsq1 = pl::magnsq(p1);     // squared magnitudes, avoid sqrt
+            auto lsq2 = pl::magnsq(p2);     // squared magnitudes, avoid sqrt
+
+            // We will actually compare l^2 * cos^2(phi) which saturates the
+            // cos function. But with the quadrant info we can get the sign back
+            int sign = q[0] == 1 || q[0] == 2 ? -1 : 1;
+            
+            // If Ratio is an actual rational type, there is no precision loss
+            auto pcos1 = Ratio(lcos[0]) / lsq1 * sign * lcos[0];
+            auto pcos2 = Ratio(lcos[1]) / lsq2 * sign * lcos[1];
+            
+            return q[0] < 2 ? pcos1 < pcos2 : pcos1 > pcos2;
+        }
+        
+        // If in different quadrants, compare the quadrant indices only.
+        return q[0] > q[1];
     });
 
     __nfp::buildPolygon(edgelist, rsh, top_nfp);

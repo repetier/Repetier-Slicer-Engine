@@ -1,7 +1,8 @@
 #include "Version.hpp"
 
-#include <boost/algorithm/string/predicate.hpp>
-#include <boost/algorithm/string/trim.hpp>
+#include <cctype>
+
+#include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #include "libslic3r/libslic3r.h"
@@ -13,7 +14,6 @@ namespace Slic3r {
 namespace GUI {
 namespace Config {
 
-static const Semver s_current_slic3r_semver(SLIC3R_VERSION);
 
 // Optimized lexicographic compare of two pre-release versions, ignoring the numeric suffix.
 static int compare_prerelease(const char *p1, const char *p2)
@@ -62,9 +62,13 @@ bool Version::is_slic3r_supported(const Semver &slic3r_version) const
 
 bool Version::is_current_slic3r_supported() const
 {
-	return this->is_slic3r_supported(s_current_slic3r_semver);
+	return this->is_slic3r_supported(Slic3r::SEMVER);
 }
 
+bool Version::is_current_slic3r_downgrade() const
+{
+	return Slic3r::SEMVER < min_slic3r_version;
+}
 #if 0
 //TODO: This test should be moved to a unit test, once we have C++ unit tests in place.
 static int version_test()
@@ -190,15 +194,21 @@ size_t Index::load(const boost::filesystem::path &path)
 {
 	m_configs.clear();
 	m_vendor = path.stem().string();
+	m_path = path;
 
     boost::nowide::ifstream ifs(path.string());
     std::string line;
     size_t idx_line = 0;
     Version ver;
     while (std::getline(ifs, line)) {
+#ifndef _MSVCVER
+		// On a Unix system, getline does not remove the trailing carriage returns, if the index is shared over a Windows filesystem. Remove them manually.
+		while (! line.empty() && line.back() == '\r')
+			line.pop_back();
+#endif
     	++ idx_line;
     	// Skip the initial white spaces.
-    	char *key = left_trim(const_cast<char*>(line.data()));
+    	char *key = left_trim(line.data());
 		if (*key == '#')
 			// Skip a comment line.
 			continue;
@@ -220,17 +230,17 @@ size_t Index::load(const boost::filesystem::path &path)
 				// End of semver or keyword.
 				break;
     	}
-    	if (*key_end != 0 && *key_end != ' ' && *key_end != '\t' && *key_end != '=')
+        if (*key_end != 0 && *key_end != ' ' && *key_end != '\t' && *key_end != '=')
     		throw file_parser_error("Invalid keyword or semantic version", path, idx_line);
-		char *value = left_trim(key_end);
+        char *value = left_trim(key_end);
 		bool  key_value_pair = *value == '=';
 		if (key_value_pair)
 			value = left_trim(value + 1);
 		*key_end = 0;
     	boost::optional<Semver> semver;
-    	if (maybe_semver)
+        if (maybe_semver)
     		semver = Semver::parse(key);
-		if (key_value_pair) {
+        if (key_value_pair) {
     		if (semver)
     			throw file_parser_error("Key cannot be a semantic version", path, idx_line);\
     		// Verify validity of the key / value pair.
@@ -238,11 +248,11 @@ size_t Index::load(const boost::filesystem::path &path)
     		if (strcmp(key, "min_slic3r_version") == 0 || strcmp(key, "max_slic3r_version") == 0) {
     			if (! svalue.empty())
 					semver = Semver::parse(svalue);
-		    	if (! semver)
+                if (! semver)
 		    		throw file_parser_error(std::string(key) + " must referece a valid semantic version", path, idx_line);
-				if (strcmp(key, "min_slic3r_version") == 0)
+                if (strcmp(key, "min_slic3r_version") == 0)
     				ver.min_slic3r_version = *semver;
-    			else
+                else
     				ver.max_slic3r_version = *semver;
     		} else {
     			// Ignore unknown keys, as there may come new keys in the future.
@@ -279,15 +289,19 @@ Index::const_iterator Index::find(const Semver &ver) const
 	return (it == m_configs.end() || it->config_version == ver) ? it : m_configs.end();
 }
 
-Index::const_iterator Index::recommended() const
+Index::const_iterator Index::recommended(const Semver &slic3r_version) const
 {
-	int idx = -1;
 	const_iterator highest = this->end();
 	for (const_iterator it = this->begin(); it != this->end(); ++ it)
-		if (it->is_current_slic3r_supported() &&
+		if (it->is_slic3r_supported(slic3r_version) &&
 			(highest == this->end() || highest->config_version < it->config_version))
 			highest = it;
 	return highest;
+}
+
+Index::const_iterator Index::recommended() const
+{
+	return this->recommended(Slic3r::SEMVER);
 }
 
 std::vector<Index> Index::load_db()
@@ -297,7 +311,7 @@ std::vector<Index> Index::load_db()
     std::vector<Index> index_db;
     std::string errors_cummulative;
 	for (auto &dir_entry : boost::filesystem::directory_iterator(cache_dir))
-        if (boost::filesystem::is_regular_file(dir_entry.status()) && boost::algorithm::iends_with(dir_entry.path().filename().string(), ".idx")) {
+        if (Slic3r::is_idx_file(dir_entry)) {
         	Index idx;
             try {
             	idx.load(dir_entry.path());
@@ -310,7 +324,7 @@ std::vector<Index> Index::load_db()
         }
 
     if (! errors_cummulative.empty())
-        throw std::runtime_error(errors_cummulative);
+        throw Slic3r::RuntimeError(errors_cummulative);
     return index_db;
 }
 

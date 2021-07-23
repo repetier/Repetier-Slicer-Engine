@@ -2,6 +2,7 @@
 #include "CoolingBuffer.hpp"
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/log/trivial.hpp>
 #include <iostream>
 #include <float.h>
 
@@ -252,8 +253,10 @@ float new_feedrate_to_reach_time_stretch(
 			for (size_t i = 0; i < (*it)->n_lines_adjustable; ++i) {
 				const CoolingLine &line = (*it)->lines[i];
                 if (line.feedrate > min_feedrate && line.feedrate < new_feedrate)
-                    // Some of the line segments taken into account in the calculation of nomin / denom are now slower than new_feedrate.
-                    // Re-run the calculation with a new min_feedrate limit.
+                    // Some of the line segments taken into account in the calculation of nomin / denom are now slower than new_feedrate, 
+                    // which makes the new_feedrate lower than it should be.
+                    // Re-run the calculation with a new min_feedrate limit, so that the segments with current feedrate lower than new_feedrate
+                    // are not taken into account.
                     goto not_finished_yet;
             }
         goto finished;
@@ -300,8 +303,8 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
         unsigned int            extruder_id = extruders[i].id();
         adj.extruder_id               = extruder_id;
         adj.cooling_slow_down_enabled = config.cooling.get_at(extruder_id);
-        adj.slowdown_below_layer_time = config.slowdown_below_layer_time.get_at(extruder_id);
-        adj.min_print_speed           = config.min_print_speed.get_at(extruder_id);
+        adj.slowdown_below_layer_time = float(config.slowdown_below_layer_time.get_at(extruder_id));
+        adj.min_print_speed           = float(config.min_print_speed.get_at(extruder_id));
         map_extruder_to_per_extruder_adjustment[extruder_id] = i;
     }
 
@@ -413,13 +416,22 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             line.type = CoolingLine::TYPE_EXTRUDE_END;
             active_speed_modifier = size_t(-1);
         } else if (boost::starts_with(sline, toolchange_prefix)) {
-            // Switch the tool.
-            line.type = CoolingLine::TYPE_SET_TOOL;
             unsigned int new_extruder = (unsigned int)atoi(sline.c_str() + toolchange_prefix.size());
-            if (new_extruder != current_extruder) {
-                current_extruder = new_extruder;
-                adjustment         = &per_extruder_adjustments[map_extruder_to_per_extruder_adjustment[current_extruder]];
+            // Only change extruder in case the number is meaningful. User could provide an out-of-range index through custom gcodes - those shall be ignored.
+            if (new_extruder < map_extruder_to_per_extruder_adjustment.size()) {
+                if (new_extruder != current_extruder) {
+                    // Switch the tool.
+                    line.type = CoolingLine::TYPE_SET_TOOL;
+                    current_extruder = new_extruder;
+                    adjustment         = &per_extruder_adjustments[map_extruder_to_per_extruder_adjustment[current_extruder]];
+                }
             }
+            else {
+                // Only log the error in case of MM printer. Single extruder printers likely ignore any T anyway.
+                if (map_extruder_to_per_extruder_adjustment.size() > 1)
+                    BOOST_LOG_TRIVIAL(error) << "CoolingBuffer encountered an invalid toolchange, maybe from a custom gcode: " << sline;
+            }
+
         } else if (boost::starts_with(sline, ";_BRIDGE_FAN_START")) {
             line.type = CoolingLine::TYPE_BRIDGE_FAN_START;
         } else if (boost::starts_with(sline, ";_BRIDGE_FAN_END")) {
@@ -670,7 +682,8 @@ std::string CoolingBuffer::apply_layer_cooldown(
 #define EXTRUDER_CONFIG(OPT) config.OPT.get_at(m_current_extruder)
         int min_fan_speed = EXTRUDER_CONFIG(min_fan_speed);
         int fan_speed_new = EXTRUDER_CONFIG(fan_always_on) ? min_fan_speed : 0;
-        if (layer_id >= EXTRUDER_CONFIG(disable_fan_first_layers)) {
+        int disable_fan_first_layers = EXTRUDER_CONFIG(disable_fan_first_layers);
+        if (int(layer_id) >= disable_fan_first_layers) {
             int   max_fan_speed             = EXTRUDER_CONFIG(max_fan_speed);
             float slowdown_below_layer_time = float(EXTRUDER_CONFIG(slowdown_below_layer_time));
             float fan_below_layer_time      = float(EXTRUDER_CONFIG(fan_below_layer_time));
@@ -686,6 +699,17 @@ std::string CoolingBuffer::apply_layer_cooldown(
                 }
             }
             bridge_fan_speed   = EXTRUDER_CONFIG(bridge_fan_speed);
+            // Is the fan speed ramp enabled?
+            int full_fan_speed_layer = EXTRUDER_CONFIG(full_fan_speed_layer);
+            // When ramping up fan speed from disable_fan_first_layers to full_fan_speed_layer, force disable_fan_first_layers above zero,
+            // so there will be a zero fan speed at least at the 1st layer.
+            disable_fan_first_layers = std::max(disable_fan_first_layers, 1);
+            if (int(layer_id) >= disable_fan_first_layers && int(layer_id) + 1 < full_fan_speed_layer) {
+                // Ramp up the fan speed from disable_fan_first_layers to full_fan_speed_layer.
+                float factor = float(int(layer_id + 1) - disable_fan_first_layers) / float(full_fan_speed_layer - disable_fan_first_layers);
+                fan_speed_new    = clamp(0, 255, int(float(fan_speed_new   ) * factor + 0.5f));
+                bridge_fan_speed = clamp(0, 255, int(float(bridge_fan_speed) * factor + 0.5f));
+            }
 #undef EXTRUDER_CONFIG
             bridge_fan_control = bridge_fan_speed > fan_speed_new;
         } else {

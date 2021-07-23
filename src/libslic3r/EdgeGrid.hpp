@@ -21,9 +21,13 @@ public:
 	void set_bbox(const BoundingBox &bbox) { m_bbox = bbox; }
 
 	void create(const Polygons &polygons, coord_t resolution);
+	void create(const std::vector<const Polygon*> &polygons, coord_t resolution);
+	void create(const std::vector<Points> &polygons, coord_t resolution);
 	void create(const ExPolygon &expoly, coord_t resolution);
 	void create(const ExPolygons &expolygons, coord_t resolution);
 	void create(const ExPolygonCollection &expolygons, coord_t resolution);
+
+	const std::vector<const Slic3r::Points*>& contours() const { return m_contours; }
 
 #if 0
 	// Test, whether the edges inside the grid intersect with the polygons provided.
@@ -46,7 +50,19 @@ public:
 	float signed_distance_bilinear(const Point &pt) const;
 
 	// Calculate a signed distance to the contours in search_radius from the point.
-	bool signed_distance_edges(const Point &pt, coord_t search_radius, coordf_t &result_min_dist, bool *pon_segment = NULL) const;
+	struct ClosestPointResult {
+		size_t contour_idx  	= size_t(-1);
+		size_t start_point_idx  = size_t(-1);
+		// Signed distance to the closest point.
+		double distance 		= std::numeric_limits<double>::max();
+		// Parameter of the closest point on edge starting with start_point_idx <0, 1)
+		double t 				= 0.;
+
+		bool valid() const { return contour_idx != size_t(-1); }
+	};
+	ClosestPointResult closest_point(const Point &pt, coord_t search_radius) const;
+
+	bool signed_distance_edges(const Point &pt, coord_t search_radius, coordf_t &result_min_dist, bool *pon_segment = nullptr) const;
 
 	// Calculate a signed distance to the contours in search_radius from the point. If no edge is found in search_radius,
 	// return an interpolated value from m_signed_distance_field, if it exists.
@@ -65,6 +81,194 @@ public:
 	std::vector<std::pair<ContourEdge, ContourEdge>> intersecting_edges() const;
 	bool 											 has_intersecting_edges() const;
 
+	template<typename VISITOR> void visit_cells_intersecting_line(Slic3r::Point p1, Slic3r::Point p2, VISITOR &visitor) const
+	{
+		// End points of the line segment.
+		assert(m_bbox.contains(p1));
+		assert(m_bbox.contains(p2));
+		p1 -= m_bbox.min;
+		p2 -= m_bbox.min;
+		assert(p1.x() >= 0 && p1.x() < m_cols * m_resolution);
+		assert(p1.y() >= 0 && p1.y() < m_rows * m_resolution);
+		assert(p2.x() >= 0 && p2.x() < m_cols * m_resolution);
+		assert(p2.y() >= 0 && p2.y() < m_rows * m_resolution);
+		// Get the cells of the end points.
+		coord_t ix = p1(0) / m_resolution;
+		coord_t iy = p1(1) / m_resolution;
+		coord_t ixb = p2(0) / m_resolution;
+		coord_t iyb = p2(1) / m_resolution;
+		assert(ix >= 0 && size_t(ix) < m_cols);
+		assert(iy >= 0 && size_t(iy) < m_rows);
+		assert(ixb >= 0 && size_t(ixb) < m_cols);
+		assert(iyb >= 0 && size_t(iyb) < m_rows);
+		// Account for the end points.
+		if (! visitor(iy, ix) || (ix == ixb && iy == iyb))
+			// Both ends fall into the same cell.
+			return;
+		// Raster the centeral part of the line.
+		coord_t dx = std::abs(p2(0) - p1(0));
+		coord_t dy = std::abs(p2(1) - p1(1));
+		if (p1(0) < p2(0)) {
+			int64_t ex = int64_t((ix + 1)*m_resolution - p1(0)) * int64_t(dy);
+			if (p1(1) < p2(1)) {
+				// x positive, y positive
+				int64_t ey = int64_t((iy + 1)*m_resolution - p1(1)) * int64_t(dx);
+				do {
+					assert(ix <= ixb && iy <= iyb);
+					if (ex < ey) {
+						ey -= ex;
+						ex = int64_t(dy) * m_resolution;
+						ix += 1;
+						assert(ix <= ixb);
+					}
+					else if (ex == ey) {
+						ex = int64_t(dy) * m_resolution;
+						ey = int64_t(dx) * m_resolution;
+						ix += 1;
+						iy += 1;
+						assert(ix <= ixb);
+						assert(iy <= iyb);
+					}
+					else {
+						assert(ex > ey);
+						ex -= ey;
+						ey = int64_t(dx) * m_resolution;
+						iy += 1;
+						assert(iy <= iyb);
+					}
+					if (! visitor(iy, ix))
+						return;
+				} while (ix != ixb || iy != iyb);
+			}
+			else {
+				// x positive, y non positive
+				int64_t ey = int64_t(p1(1) - iy*m_resolution) * int64_t(dx);
+				do {
+					assert(ix <= ixb && iy >= iyb);
+					if (ex <= ey) {
+						ey -= ex;
+						ex = int64_t(dy) * m_resolution;
+						ix += 1;
+						assert(ix <= ixb);
+					}
+					else {
+						ex -= ey;
+						ey = int64_t(dx) * m_resolution;
+						iy -= 1;
+						assert(iy >= iyb);
+					}
+					if (! visitor(iy, ix))
+						return;
+				} while (ix != ixb || iy != iyb);
+			}
+		}
+		else {
+			int64_t ex = int64_t(p1(0) - ix*m_resolution) * int64_t(dy);
+			if (p1(1) < p2(1)) {
+				// x non positive, y positive
+				int64_t ey = int64_t((iy + 1)*m_resolution - p1(1)) * int64_t(dx);
+				do {
+					assert(ix >= ixb && iy <= iyb);
+					if (ex < ey) {
+						ey -= ex;
+						ex = int64_t(dy) * m_resolution;
+						ix -= 1;
+						assert(ix >= ixb);
+					}
+					else {
+						assert(ex >= ey);
+						ex -= ey;
+						ey = int64_t(dx) * m_resolution;
+						iy += 1;
+						assert(iy <= iyb);
+					}
+					if (! visitor(iy, ix))
+						return;
+				} while (ix != ixb || iy != iyb);
+			}
+			else {
+				// x non positive, y non positive
+				int64_t ey = int64_t(p1(1) - iy*m_resolution) * int64_t(dx);
+				do {
+					assert(ix >= ixb && iy >= iyb);
+					if (ex < ey) {
+						ey -= ex;
+						ex = int64_t(dy) * m_resolution;
+						ix -= 1;
+						assert(ix >= ixb);
+					}
+					else if (ex == ey) {
+						// The lower edge of a grid cell belongs to the cell.
+						// Handle the case where the ray may cross the lower left corner of a cell in a general case,
+						// or a left or lower edge in a degenerate case (horizontal or vertical line).
+						if (dx > 0) {
+							ex = int64_t(dy) * m_resolution;
+							ix -= 1;
+							assert(ix >= ixb);
+						}
+						if (dy > 0) {
+							ey = int64_t(dx) * m_resolution;
+							iy -= 1;
+							assert(iy >= iyb);
+						}
+					}
+					else {
+						assert(ex > ey);
+						ex -= ey;
+						ey = int64_t(dx) * m_resolution;
+						iy -= 1;
+						assert(iy >= iyb);
+					}
+					if (! visitor(iy, ix))
+						return;
+				} while (ix != ixb || iy != iyb);
+			}
+		}
+	}
+
+	template<typename VISITOR> void visit_cells_intersecting_box(BoundingBox bbox, VISITOR &visitor) const
+	{
+		// End points of the line segment.
+		bbox.min -= m_bbox.min;
+		bbox.max -= m_bbox.min + Point(1, 1);
+		// Get the cells of the end points.
+		bbox.min /= m_resolution;
+		bbox.max /= m_resolution;
+		// Trim with the cells.
+		bbox.min.x() = std::max<coord_t>(bbox.min.x(), 0);
+		bbox.min.y() = std::max<coord_t>(bbox.min.y(), 0);
+		bbox.max.x() = std::min<coord_t>(bbox.max.x(), (coord_t)m_cols - 1);
+		bbox.max.y() = std::min<coord_t>(bbox.max.y(), (coord_t)m_rows - 1);
+		for (coord_t iy = bbox.min.y(); iy <= bbox.max.y(); ++ iy)
+			for (coord_t ix = bbox.min.x(); ix <= bbox.max.x(); ++ ix)
+				if (! visitor(iy, ix))
+					return;
+	}
+
+	std::pair<std::vector<std::pair<size_t, size_t>>::const_iterator, std::vector<std::pair<size_t, size_t>>::const_iterator> cell_data_range(coord_t row, coord_t col) const
+	{
+		assert(row >= 0);
+		assert(row < m_rows);
+		assert(col >= 0);
+		assert(col < m_cols);
+		const EdgeGrid::Grid::Cell &cell = m_cells[row * m_cols + col];
+		return std::make_pair(m_cell_data.begin() + cell.begin, m_cell_data.begin() + cell.end);
+	}
+
+	std::pair<const Slic3r::Point&, const Slic3r::Point&> segment(const std::pair<size_t, size_t> &contour_and_segment_idx) const
+	{
+		const Slic3r::Points &ipts = *m_contours[contour_and_segment_idx.first];
+		size_t ipt = contour_and_segment_idx.second;
+		return std::pair<const Slic3r::Point&, const Slic3r::Point&>(ipts[ipt], ipts[ipt + 1 == ipts.size() ? 0 : ipt + 1]);
+	}
+
+	Line line(const std::pair<size_t, size_t> &contour_and_segment_idx) const
+	{
+		const Slic3r::Points &ipts = *m_contours[contour_and_segment_idx.first];
+		size_t ipt = contour_and_segment_idx.second;
+		return Line(ipts[ipt], ipts[ipt + 1 == ipts.size() ? 0 : ipt + 1]);
+	}
+
 protected:
 	struct Cell {
 		Cell() : begin(0), end(0) {}
@@ -78,8 +282,8 @@ protected:
 #endif
 	bool cell_inside_or_crossing(int r, int c) const
 	{
-		if (r < 0 || r >= m_rows ||
-			c < 0 || c >= m_cols)
+		if (r < 0 || (size_t)r >= m_rows ||
+			c < 0 || (size_t)c >= m_cols)
 			// The cell is outside the domain. Hoping that the contours were correctly oriented, so
 			// there is a CCW outmost contour so the out of domain cells are outside.
 			return false;
@@ -112,10 +316,8 @@ protected:
 	std::vector<float>							m_signed_distance_field;
 };
 
-#if 0
 // Debugging utility. Save the signed distance field.
-extern void save_png(const Grid &grid, const BoundingBox &bbox, coord_t resolution, const char *path);
-#endif /* SLIC3R_GUI */
+extern void save_png(const Grid &grid, const BoundingBox &bbox, coord_t resolution, const char *path, size_t scale = 1);
 
 } // namespace EdgeGrid
 

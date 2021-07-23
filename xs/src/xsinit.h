@@ -40,7 +40,7 @@
 // #include <libslic3r.h>
 
 #ifdef SLIC3RXS
-extern "C" {
+// extern "C" {
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
@@ -69,9 +69,13 @@ extern "C" {
     #undef fwrite
     #undef fclose
     #undef sleep
+    #undef snprintf
+    #undef strerror
     #undef test
+    #undef times
     #undef accept
     #undef wait
+    #undef abort
 
 	// Breaks compilation with Eigen matrices embedded into Slic3r::Point.
 	#undef malloc
@@ -85,7 +89,7 @@ extern "C" {
 #undef Zero
 #undef Packet
 #undef _
-}
+// }
 #endif
 
 #include <ClipperUtils.hpp>

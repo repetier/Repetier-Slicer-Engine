@@ -1,5 +1,5 @@
-project(Slic3r)
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.13)
+project(PrusaSlicer)
 
 include("version.inc")
 include(GNUInstallDirs)
@@ -13,30 +13,48 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 if(DEFINED ENV{SLIC3R_STATIC})
-	set(SLIC3R_STATIC_INITIAL $ENV{SLIC3R_STATIC})
+        set(SLIC3R_STATIC_INITIAL $ENV{SLIC3R_STATIC})
 else()
-	if (MSVC OR MINGW OR APPLE)
-		set(SLIC3R_STATIC_INITIAL 1)
-	else()
-		set(SLIC3R_STATIC_INITIAL 0)
-	endif()
+        if (MSVC OR MINGW OR APPLE)
+                set(SLIC3R_STATIC_INITIAL 1)
+        else()
+                set(SLIC3R_STATIC_INITIAL 0)
+        endif()
 endif()
 
-option(SLIC3R_STATIC 			"Compile Slic3r with static libraries (Boost, TBB, glew)" ${SLIC3R_STATIC_INITIAL})
-option(SLIC3R_GUI    			"Compile Slic3r with GUI components (OpenGL, wxWidgets)" 1)
-option(SLIC3R_FHS               "Assume Slic3r is to be installed in a FHS directory structure" 0)
+option(SLIC3R_STATIC 			"Compile PrusaSlicer with static libraries (Boost, TBB, glew)" ${SLIC3R_STATIC_INITIAL})
+option(SLIC3R_GUI    			"Compile PrusaSlicer with GUI components (OpenGL, wxWidgets)" 1)
+option(SLIC3R_FHS               "Assume PrusaSlicer is to be installed in a FHS directory structure" 0)
 option(SLIC3R_WX_STABLE         "Build against wxWidgets stable (3.0) as oppsed to dev (3.1) on Linux" 0)
-option(SLIC3R_PROFILE 			"Compile Slic3r with an invasive Shiny profiler" 0)
+option(SLIC3R_PROFILE 			"Compile PrusaSlicer with an invasive Shiny profiler" 0)
 option(SLIC3R_PCH               "Use precompiled headers" 1)
 option(SLIC3R_MSVC_COMPILE_PARALLEL "Compile on Visual Studio in parallel" 1)
 option(SLIC3R_MSVC_PDB          "Generate PDB files on MSVC in Release mode" 1)
 option(SLIC3R_PERL_XS           "Compile XS Perl module and enable Perl unit and integration tests" 0)
 option(SLIC3R_ASAN              "Enable ASan on Clang and GCC" 0)
-option(SLIC3R_SYNTAXONLY        "Only perform source code correctness checking, no binary output (UNIX only)" 0)
+
+set(SLIC3R_GTK "2" CACHE STRING "GTK version to use with wxWidgets on Linux")
+
+set(IS_CROSS_COMPILE FALSE)
+
+if (APPLE)
+    set(CMAKE_FIND_FRAMEWORK LAST)
+    set(CMAKE_FIND_APPBUNDLE LAST)
+    list(FIND CMAKE_OSX_ARCHITECTURES ${CMAKE_SYSTEM_PROCESSOR} _arch_idx)
+    if (CMAKE_OSX_ARCHITECTURES AND _arch_idx LESS 0)
+        set(IS_CROSS_COMPILE TRUE)
+    endif ()
+endif ()
 
 # Proposal for C++ unit tests and sandboxes
 option(SLIC3R_BUILD_SANDBOXES   "Build development sandboxes" OFF)
-option(SLIC3R_BUILD_TESTS       "Build unit tests" OFF)
+option(SLIC3R_BUILD_TESTS       "Build unit tests" ON)
+
+if (IS_CROSS_COMPILE)
+    message("Detected cross compilation setup. Tests and encoding checks will be forcedly disabled!")
+    set(SLIC3R_PERL_XS OFF CACHE BOOL "" FORCE)
+    set(SLIC3R_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+endif ()
 
 # Print out the SLIC3R_* cache options
 get_cmake_property(_cache_vars CACHE_VARIABLES)
@@ -47,13 +65,37 @@ foreach (_cache_var ${_cache_vars})
     endif ()
 endforeach()
 
+if (SLIC3R_GUI)
+    add_definitions(-DSLIC3R_GUI)
+endif ()
+
+if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL Clang)
+    set(IS_CLANG_CL TRUE)
+
+    # clang-cl can interpret SYSTEM header paths if -imsvc is used
+    set(CMAKE_INCLUDE_SYSTEM_FLAG_CXX "-imsvc")
+
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall \
+        -Wno-old-style-cast -Wno-reserved-id-macro -Wno-c++98-compat-pedantic")
+else ()
+    set(IS_CLANG_CL FALSE)
+endif ()
+
 if (MSVC)
-    if (SLIC3R_MSVC_COMPILE_PARALLEL)
-	   add_compile_options(/MP)
+    if (SLIC3R_MSVC_COMPILE_PARALLEL AND NOT IS_CLANG_CL)
+           add_compile_options(/MP)
     endif ()
     # /bigobj (Increase Number of Sections in .Obj file)
     # error C3859: virtual memory range for PCH exceeded; please recompile with a command line option of '-Zm90' or greater
-    add_compile_options(-bigobj -Zm316)
+    # Generate symbols at every build target, even for the release.
+    add_compile_options(-bigobj -Zm520 /Zi)
+    # Disable STL4007: Many result_type typedefs and all argument_type, first_argument_type, and second_argument_type typedefs are deprecated in C++17.
+    #FIXME Remove this line after eigen library adapts to the new C++17 adaptor rules.
+    add_compile_options(-D_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING)
+endif ()
+
+if (MINGW)
+    add_compile_options(-Wa,-mbig-obj)
 endif ()
 
 # Display and check CMAKE_PREFIX_PATH
@@ -79,11 +121,9 @@ list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/modules/)
 
 enable_testing ()
 
-# Enable C++11 language standard.
-set(CMAKE_CXX_STANDARD 11)
+# Enable C++17 language standard.
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
 
 if(NOT WIN32)
     # Add DEBUG flags to debug builds.
@@ -97,17 +137,17 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # WIN10SDK_PATH is used to point CMake to the WIN10 SDK installation directory.
 # We pick it from environment if it is not defined in another way
 if(WIN32)
-	if(NOT DEFINED WIN10SDK_PATH)
-		if(DEFINED ENV{WIN10SDK_PATH})
-			set(WIN10SDK_PATH "$ENV{WIN10SDK_PATH}")
-		endif()
-	endif()
-	if(DEFINED WIN10SDK_PATH AND NOT EXISTS "${WIN10SDK_PATH}/include/winrt/windows.graphics.printing3d.h")
-		message("WIN10SDK_PATH is invalid: ${WIN10SDK_PATH}")
-		message("${WIN10SDK_PATH}/include/winrt/windows.graphics.printing3d.h was not found")
-		message("STL fixing by the Netfabb service will not be compiled")
-		unset(WIN10SDK_PATH)
-	endif()
+        if(NOT DEFINED WIN10SDK_PATH)
+                if(DEFINED ENV{WIN10SDK_PATH})
+                        set(WIN10SDK_PATH "$ENV{WIN10SDK_PATH}")
+                endif()
+        endif()
+        if(DEFINED WIN10SDK_PATH AND NOT EXISTS "${WIN10SDK_PATH}/include/winrt/windows.graphics.printing3d.h")
+                message("WIN10SDK_PATH is invalid: ${WIN10SDK_PATH}")
+                message("${WIN10SDK_PATH}/include/winrt/windows.graphics.printing3d.h was not found")
+                message("STL fixing by the Netfabb service will not be compiled")
+                unset(WIN10SDK_PATH)
+        endif()
     if(WIN10SDK_PATH)
         message("Building with Win10 Netfabb STL fixing service support")
         add_definitions(-DHAS_WIN10SDK)
@@ -133,40 +173,48 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # Workaround for an old CMake, which does not understand CMAKE_CXX_STANDARD.
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
     endif()
+
+    # Boost on Raspberry-Pi does not link to pthreads.
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+
+    find_package(DBus REQUIRED)
+    include_directories(${DBUS_INCLUDE_DIRS})
 endif()
 
 if (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUXX)
     # Adding -fext-numeric-literals to enable GCC extensions on definitions of quad float literals, which are required by Boost.
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fext-numeric-literals" )
-
-    if (SLIC3R_SYNTAXONLY)
-        set(CMAKE_CXX_ARCHIVE_CREATE "true")
-        set(CMAKE_C_ARCHIVE_CREATE "true")
-        set(CMAKE_CXX_ARCHIVE_APPEND "true")
-        set(CMAKE_C_ARCHIVE_APPEND "true")
-        set(CMAKE_RANLIB "true")
-        set(CMAKE_C_LINK_EXECUTABLE "true")
-        set(CMAKE_CXX_LINK_EXECUTABLE "true")
-
-        set(CMAKE_C_COMPILE_OBJECT "<CMAKE_C_COMPILER> -fsyntax-only <DEFINES> <INCLUDES> <FLAGS> -c <SOURCE> && touch <OBJECT>")
-        set(CMAKE_CXX_COMPILE_OBJECT "<CMAKE_CXX_COMPILER> -fsyntax-only <DEFINES> <INCLUDES> <FLAGS> -c <SOURCE> && touch <OBJECT>")
-    endif ()
 endif()
 
-if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-    add_compile_options(-Wall)
+if (NOT MSVC AND ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang"))
+    if (NOT MINGW)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall" )
+    endif ()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-reorder" )
 
     # On GCC and Clang, no return from a non-void function is a warning only. Here, we make it an error.
     add_compile_options(-Werror=return-type)
 
-    #removes LOTS of extraneous Eigen warnings
-    add_compile_options(-Wno-ignored-attributes)
+    # removes LOTS of extraneous Eigen warnings (GCC only supports it since 6.1)
+    # https://eigen.tuxfamily.org/bz/show_bug.cgi?id=1221
+    if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang" OR CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 6.0)
+        add_compile_options(-Wno-ignored-attributes) # Tamas: Eigen include dirs are marked as SYSTEM
+    endif()
+
+    #GCC generates loads of -Wunknown-pragmas when compiling igl. The fix is not easy due to a bug in gcc, see
+    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=66943 or
+    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=53431
+    # We will turn the warning of for GCC for now:
+    if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+        add_compile_options(-Wno-unknown-pragmas)
+    endif()
 
     if (SLIC3R_ASAN)
         add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
         set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
+        set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=address")
 
         if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
             set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lasan")
@@ -190,20 +238,26 @@ include_directories(${LIBDIR_BIN}/platform)
 include_directories(${LIBDIR}/clipper ${LIBDIR}/polypartition)
 
 if(WIN32)
-    # BOOST_ALL_NO_LIB: Avoid the automatic linking of Boost libraries on Windows. Rather rely on explicit linking.
-    add_definitions(-D_USE_MATH_DEFINES -D_WIN32 -DBOOST_ALL_NO_LIB -DBOOST_USE_WINAPI_VERSION=0x601 -D_CRT_SECURE_NO_WARNINGS -D_SCL_SECURE_NO_WARNINGS)
-endif()
+    add_definitions(-D_USE_MATH_DEFINES -D_WIN32 -D_CRT_SECURE_NO_WARNINGS -D_SCL_SECURE_NO_WARNINGS)
+    if(MSVC)
+        # BOOST_ALL_NO_LIB: Avoid the automatic linking of Boost libraries on Windows. Rather rely on explicit linking.
+        add_definitions(-DBOOST_ALL_NO_LIB -DBOOST_USE_WINAPI_VERSION=0x601 -DBOOST_SYSTEM_USE_UTF8 )
+    endif(MSVC)
+endif(WIN32)
 
 add_definitions(-DwxUSE_UNICODE -D_UNICODE -DUNICODE -DWXINTL_NO_GETTEXT_MACRO)
 
+# Disable unsafe implicit wxString to const char* / std::string and vice versa. This implicit conversion breaks the UTF-8 encoding quite often.
+add_definitions(-DwxNO_UNSAFE_WXSTRING_CONV)
+
 if (SLIC3R_PROFILE)
-    message("Slic3r will be built with a Shiny invasive profiler")
+    message("PrusaSlicer will be built with a Shiny invasive profiler")
     add_definitions(-DSLIC3R_PROFILE)
 endif ()
 
 # Disable optimization even with debugging on.
 if (0)
-    message(STATUS "Perl compiled without optimization. Disabling optimization for the Slic3r build.")
+    message(STATUS "Perl compiled without optimization. Disabling optimization for the PrusaSlicer build.")
     message("Old CMAKE_CXX_FLAGS_RELEASE: ${CMAKE_CXX_FLAGS_RELEASE}")
     message("Old CMAKE_CXX_FLAGS_RELWITHDEBINFO: ${CMAKE_CXX_FLAGS_RELEASE}")
     message("Old CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS_RELEASE}")
@@ -223,19 +277,60 @@ if(SLIC3R_STATIC)
     # set(Boost_USE_STATIC_RUNTIME ON)
 endif()
 #set(Boost_DEBUG ON)
-# set(Boost_COMPILER "-vc120")
-# find_package(Boost REQUIRED COMPONENTS system filesystem thread log locale regex)
-find_package(Boost REQUIRED COMPONENTS system filesystem thread log regex)
-if(Boost_FOUND)
-    include_directories(${Boost_INCLUDE_DIRS})
-    if (APPLE)
-        # BOOST_ASIO_DISABLE_KQUEUE : prevents a Boost ASIO bug on OS X: https://svn.boost.org/trac/boost/ticket/5339
-        add_definitions(-DBOOST_ASIO_DISABLE_KQUEUE)
-    endif()
-    if(NOT SLIC3R_STATIC)
-        add_definitions(-DBOOST_LOG_DYN_LINK)
-    endif()
+# set(Boost_COMPILER "-mgw81")
+if(NOT WIN32)
+    # boost::process was introduced first in version 1.64.0
+    set(MINIMUM_BOOST_VERSION "1.64.0")
 endif()
+set(_boost_components "system;filesystem;thread;log;locale;regex;chrono;atomic;date_time")
+find_package(Boost ${MINIMUM_BOOST_VERSION} REQUIRED COMPONENTS ${_boost_components})
+
+add_library(boost_libs INTERFACE)
+add_library(boost_headeronly INTERFACE)
+
+if (APPLE)
+    # BOOST_ASIO_DISABLE_KQUEUE : prevents a Boost ASIO bug on OS X: https://svn.boost.org/trac/boost/ticket/5339
+    target_compile_definitions(boost_headeronly INTERFACE BOOST_ASIO_DISABLE_KQUEUE)
+endif()
+
+if(NOT SLIC3R_STATIC)
+    target_compile_definitions(boost_headeronly INTERFACE BOOST_LOG_DYN_LINK)
+endif()
+
+function(slic3r_remap_configs targets from_Cfg to_Cfg)
+    if(MSVC)
+        string(TOUPPER ${from_Cfg} from_CFG)
+    
+        foreach(tgt ${targets})
+            if(TARGET ${tgt})
+                set_target_properties(${tgt} PROPERTIES MAP_IMPORTED_CONFIG_${from_CFG} ${to_Cfg})
+            endif()
+        endforeach()
+    endif()
+endfunction()
+
+if(TARGET Boost::system)
+    message(STATUS "Boost::boost exists")
+    target_link_libraries(boost_headeronly INTERFACE Boost::boost)
+
+    # Only from cmake 3.12
+    # list(TRANSFORM _boost_components PREPEND Boost:: OUTPUT_VARIABLE _boost_targets)
+    set(_boost_targets "")
+    foreach(comp ${_boost_components})
+        list(APPEND _boost_targets "Boost::${comp}")
+    endforeach()
+
+    target_link_libraries(boost_libs INTERFACE
+        boost_headeronly # includes the custom compile definitions as well
+        ${_boost_targets}
+        )
+    slic3r_remap_configs("${_boost_targets}" RelWithDebInfo Release)
+else()
+    target_include_directories(boost_headeronly INTERFACE ${Boost_INCLUDE_DIRS})
+    target_link_libraries(boost_libs INTERFACE boost_headeronly ${Boost_LIBRARIES})
+endif()
+
+
 
 # Find and configure intel-tbb
 if(SLIC3R_STATIC)
@@ -243,23 +338,31 @@ if(SLIC3R_STATIC)
 endif()
 set(TBB_DEBUG 1)
 find_package(TBB REQUIRED)
-include_directories(${TBB_INCLUDE_DIRS})
-add_definitions(${TBB_DEFINITIONS})
-if(MSVC)
-    # Suppress implicit linking of the TBB libraries by the Visual Studio compiler.
-    add_definitions(-D__TBB_NO_IMPLICIT_LINKAGE)
-endif()
+# include_directories(${TBB_INCLUDE_DIRS})
+# add_definitions(${TBB_DEFINITIONS})
+# if(MSVC)
+#     # Suppress implicit linking of the TBB libraries by the Visual Studio compiler.
+#     add_definitions(-D__TBB_NO_IMPLICIT_LINKAGE)
+# endif()
 # The Intel TBB library will use the std::exception_ptr feature of C++11.
-add_definitions(-DTBB_USE_CAPTURED_EXCEPTION=0)
+# add_definitions(-DTBB_USE_CAPTURED_EXCEPTION=0)
 
 find_package(CURL REQUIRED)
-include_directories(${CURL_INCLUDE_DIRS})
+
+add_library(libcurl INTERFACE)
+target_link_libraries(libcurl INTERFACE CURL::libcurl)
+
+if (NOT WIN32)
+    # Required by libcurl
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(libcurl INTERFACE ZLIB::ZLIB)
+endif()
 
 if (SLIC3R_STATIC)
     if (NOT APPLE)
         # libcurl is always linked dynamically to the system libcurl on OSX.
         # On other systems, libcurl is linked statically if SLIC3R_STATIC is set.
-        add_definitions(-DCURL_STATICLIB)
+        target_compile_definitions(libcurl INTERFACE CURL_STATICLIB)
     endif()
     if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # As of now, our build system produces a statically linked libcurl,
@@ -267,7 +370,8 @@ if (SLIC3R_STATIC)
         find_package(OpenSSL REQUIRED)
         message("OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
         message("OpenSSL libraries: ${OPENSSL_LIBRARIES}")
-        include_directories(${OPENSSL_INCLUDE_DIR})
+        target_include_directories(libcurl INTERFACE ${OPENSSL_INCLUDE_DIR})
+        target_link_libraries(libcurl INTERFACE ${OPENSSL_LIBRARIES})
     endif()
 endif()
 
@@ -275,19 +379,19 @@ endif()
 
 # Find eigen3 or use bundled version
 if (NOT SLIC3R_STATIC)
-    find_package(Eigen3 3)
+    find_package(Eigen3 3.3)
 endif ()
-if (NOT Eigen3_FOUND)
-    set(Eigen3_FOUND 1)
+if (NOT EIGEN3_FOUND)
+    set(EIGEN3_FOUND 1)
     set(EIGEN3_INCLUDE_DIR ${LIBDIR}/eigen/)
 endif ()
-include_directories(${EIGEN3_INCLUDE_DIR})
+include_directories(BEFORE SYSTEM ${EIGEN3_INCLUDE_DIR})
 
 # Find expat or use bundled version
 # Always use the system libexpat on Linux.
-if (NOT SLIC3R_STATIC OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    find_package(EXPAT)
-endif ()
+
+find_package(EXPAT)
+
 if (NOT EXPAT_FOUND)
     add_library(expat STATIC
         ${LIBDIR}/expat/xmlparse.c
@@ -298,34 +402,105 @@ if (NOT EXPAT_FOUND)
     set(EXPAT_INCLUDE_DIRS ${LIBDIR}/expat/)
     set(EXPAT_LIBRARIES expat)
 endif ()
-include_directories(${EXPAT_INCLUDE_DIRS})
+
+find_package(PNG REQUIRED)
+
+set(OpenGL_GL_PREFERENCE "LEGACY")
+find_package(OpenGL REQUIRED)
 
 # Find glew or use bundled version
-if (NOT SLIC3R_STATIC)
-    find_package(GLEW)
-endif ()
+if (SLIC3R_STATIC)
+    set(GLEW_USE_STATIC_LIBS ON)
+    set(GLEW_VERBOSE ON)
+endif()
+
+find_package(GLEW)
 if (NOT GLEW_FOUND)
+    message(STATUS "GLEW not found, using bundled version.")
     add_library(glew STATIC ${LIBDIR}/glew/src/glew.c)
-    set(GLEW_FOUND 1)
+    set(GLEW_FOUND TRUE)
     set(GLEW_INCLUDE_DIRS ${LIBDIR}/glew/include/)
-    set(GLEW_LIBRARIES glew)
-    add_definitions(-DGLEW_STATIC)
+    target_compile_definitions(glew PUBLIC GLEW_STATIC)
+    target_include_directories(glew PUBLIC ${GLEW_INCLUDE_DIRS})
+    add_library(GLEW::GLEW ALIAS glew)
 endif ()
-include_directories(${GLEW_INCLUDE_DIRS})
+
+# Find the Cereal serialization library
+find_package(cereal REQUIRED)
 
 # l10n
 set(L10N_DIR "${SLIC3R_RESOURCES_DIR}/localization")
-add_custom_target(pot
-    COMMAND xgettext --keyword=L --from-code=UTF-8 --debug
+add_custom_target(gettext_make_pot
+    COMMAND xgettext --keyword=L --keyword=_L --keyword=_u8L --keyword=L_CONTEXT:1,2c --keyword=_L_PLURAL:1,2 --add-comments=TRN --from-code=UTF-8 --debug
         -f "${L10N_DIR}/list.txt"
-        -o "${L10N_DIR}/Slic3rPE.pot"
+        -o "${L10N_DIR}/PrusaSlicer.pot"
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     COMMENT "Generate pot file from strings in the source tree"
 )
+add_custom_target(gettext_po_to_mo
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    COMMENT "Generate localization po files (binary) from mo files (texts)"
+)
+file(GLOB L10N_PO_FILES "${L10N_DIR}/*/PrusaSlicer*.po")
+foreach(po_file ${L10N_PO_FILES})
+    GET_FILENAME_COMPONENT(po_dir "${po_file}" DIRECTORY)
+    SET(mo_file "${po_dir}/PrusaSlicer.mo")
+    add_custom_command(
+        TARGET gettext_po_to_mo PRE_BUILD
+        COMMAND msgfmt ARGS -o ${mo_file} ${po_file}
+        DEPENDS ${po_file}
+    )
+endforeach()
 
-# libslic3r, Slic3r GUI and the slic3r executable.
+find_package(NLopt 1.4 REQUIRED)
+
+if(SLIC3R_STATIC)
+    set(OPENVDB_USE_STATIC_LIBS ON)
+    set(USE_BLOSC TRUE)
+endif()
+
+find_package(OpenVDB 5.0 REQUIRED COMPONENTS openvdb)
+if(OpenVDB_FOUND)
+    slic3r_remap_configs(IlmBase::Half RelWithDebInfo Release)
+    slic3r_remap_configs(Blosc::blosc RelWithDebInfo Release)
+endif()
+
+set(TOP_LEVEL_PROJECT_DIR ${PROJECT_SOURCE_DIR})
+function(prusaslicer_copy_dlls target)
+    if ("${CMAKE_SIZEOF_VOID_P}" STREQUAL "8")
+        set(_bits 64)
+    elseif ("${CMAKE_SIZEOF_VOID_P}" STREQUAL "4")
+        set(_bits 32)
+    endif ()
+    
+    get_property(_is_multi GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    get_target_property(_alt_out_dir ${target} RUNTIME_OUTPUT_DIRECTORY)
+
+    if (_alt_out_dir)
+        set (_out_dir "${_alt_out_dir}")
+    elseif (_is_multi)
+        set (_out_dir "$<TARGET_PROPERTY:${target},BINARY_DIR>/$<CONFIG>")
+    else ()
+        set (_out_dir "$<TARGET_PROPERTY:${target},BINARY_DIR>")
+    endif ()
+    
+    # This has to be a separate target due to the windows command line lenght limits    
+    add_custom_command(TARGET ${target} POST_BUILD 
+        COMMAND ${CMAKE_COMMAND} -E copy ${TOP_LEVEL_PROJECT_DIR}/deps/GMP/gmp/lib/win${_bits}/libgmp-10.dll ${_out_dir}
+        COMMENT "Copy gmp runtime to build tree"
+        VERBATIM)
+    
+    add_custom_command(TARGET ${target} POST_BUILD 
+        COMMAND ${CMAKE_COMMAND} -E copy ${TOP_LEVEL_PROJECT_DIR}/deps/MPFR/mpfr/lib/win${_bits}/libmpfr-4.dll ${_out_dir}
+        COMMENT "Copy mpfr runtime to build tree"
+        VERBATIM)
+
+endfunction()
+
+
+# libslic3r, PrusaSlicer GUI and the PrusaSlicer executable.
 add_subdirectory(src)
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT slic3r_app_console)
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT PrusaSlicer_app_console)
 
 # Perl bindings, currently only used for the unit / integration tests of libslic3r.
 # Also runs the unit / integration tests.
@@ -346,8 +521,16 @@ endif()
 # Resources install target, configure fhs.hpp on UNIX
 if (WIN32)
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
-else ()
-    set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/slic3r-prusa3d")
+elseif (SLIC3R_FHS)
+    # CMAKE_INSTALL_FULL_DATAROOTDIR: read-only architecture-independent data root (share)
+    set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/PrusaSlicer")
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${SLIC3R_FHS_RESOURCES}")
+    install(FILES src/platform/unix/PrusaSlicer.desktop DESTINATION ${SLIC3R_FHS_RESOURCES}/applications)
+    install(FILES src/platform/unix/PrusaGcodeviewer.desktop DESTINATION ${SLIC3R_FHS_RESOURCES}/applications)
+else ()
+    install(FILES src/platform/unix/PrusaSlicer.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
+    install(FILES src/platform/unix/PrusaGcodeviewer.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
+    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
 endif ()
+
 configure_file(${LIBDIR}/platform/unix/fhs.hpp.in ${LIBDIR_BIN}/platform/unix/fhs.hpp)
