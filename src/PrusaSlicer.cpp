@@ -682,15 +682,10 @@ bool CLI::setup(int argc, char **argv)
 void CLI::print_help(bool include_print_options, PrinterTechnology printer_technology) const
 {
     boost::nowide::cout
-        << SLIC3R_BUILD_ID << " " << "based on Slic3r"
-#ifdef SLIC3R_GUI
-        << " (with GUI support)"
-#else /* SLIC3R_GUI */
-        << " (without GUI support)"
-#endif /* SLIC3R_GUI */
+        << SLIC3R_BUILD_ID << " " << "based on PrusaSlicer based on Slic3r"
         << std::endl
-        << "https://github.com/prusa3d/PrusaSlicer" << std::endl << std::endl
-        << "Usage: prusa-slicer [ ACTIONS ] [ TRANSFORM ] [ OPTIONS ] [ file.stl ... ]" << std::endl
+        << "https://github.com/repetier/Repetier-Slicer-Engine" << std::endl << std::endl
+        << "Usage: Repetier-Slicer-Engine [ ACTIONS ] [ TRANSFORM ] [ OPTIONS ] [ file.stl ... ]" << std::endl
         << std::endl
         << "Actions:" << std::endl;
     cli_actions_config_def.print_cli_help(boost::nowide::cout, false);

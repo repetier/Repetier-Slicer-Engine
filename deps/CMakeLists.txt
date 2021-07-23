@@ -23,6 +23,14 @@
 project(PrusaSlicer-deps)
 cmake_minimum_required(VERSION 3.2)
 
+if (APPLE)
+cmake_policy(SET CMP0114 OLD)
+#set(CMAKE_XCODE_BUILD_SYSTEM 1)
+#set(CMAKE_GENERATOR_TOOLSET buildsystem=1)
+set(CMAKE_OSX_DEPLOYMENT_TARGET 10.13)
+set(CMAKE_CONFIGURATION_TYPES "Release")
+endif()
+
 include(ExternalProject)
 include(ProcessorCount)
 
