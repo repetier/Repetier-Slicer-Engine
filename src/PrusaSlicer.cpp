@@ -43,6 +43,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Format/AMF.hpp"
 #include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/Format/RMF.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/SL1.hpp"
@@ -60,7 +61,7 @@ using namespace Slic3r;
 int CLI::run(int argc, char **argv)
 {
     // Mark the main thread for the debugger and for runtime checks.
-    set_current_thread_name("slic3r_main");
+    set_current_thread_name("rse_main");
 
 #ifdef __WXGTK__
     // On Linux, wxGTK has no support for Wayland, and the app crashes on
@@ -452,6 +453,9 @@ int CLI::run(int argc, char **argv)
         } else if (opt_key == "export_3mf") {
             if (! this->export_models(IO::TMF))
                 return 1;
+        } else if (opt_key == "export_rmf") {
+            if (! this->export_models(IO::RMF))
+                return 1;
         } else if (opt_key == "export_gcode" || opt_key == "export_sla" || opt_key == "slice") {
             if (opt_key == "export_gcode" && printer_technology == ptSLA) {
                 boost::nowide::cerr << "error: cannot export G-code for an FFF configuration" << std::endl;
@@ -729,6 +733,7 @@ bool CLI::export_models(IO::ExportFormat format)
             case IO::OBJ: success = Slic3r::store_obj(path.c_str(), &model);          break;
             case IO::STL: success = Slic3r::store_stl(path.c_str(), &model, true);    break;
             case IO::TMF: success = Slic3r::store_3mf(path.c_str(), &model, nullptr, false); break;
+            case IO::RMF: success = Slic3r::store_rmf(path.c_str(), &model, nullptr, false); break;
             default: assert(false); break;
         }
         if (success)

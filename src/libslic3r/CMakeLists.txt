@@ -72,6 +72,8 @@ add_library(libslic3r STATIC
     Format/AMF.hpp
     Format/OBJ.cpp
     Format/OBJ.hpp
+    Format/RMF.cpp
+    Format/RMF.hpp
     Format/objparser.cpp
     Format/objparser.hpp
     Format/PRUS.cpp

@@ -10,7 +10,8 @@ namespace IO {
 	enum ExportFormat : int { 
         AMF, 
         OBJ, 
-        STL, 
+        STL,
+        RMF,
         // SVG, 
         TMF, 
         Gcode

@@ -1252,7 +1252,7 @@ static Polylines connect_lines_using_hooks(Polylines &&lines, const ExPolygon &b
             }
 #ifdef ADAPTIVE_CUBIC_INFILL_DEBUG_OUTPUT
             ++ iStep;
-#endif ADAPTIVE_CUBIC_INFILL_DEBUG_OUTPUT
+#endif // ADAPTIVE_CUBIC_INFILL_DEBUG_OUTPUT
             first_i.used = true;
         }
     }
