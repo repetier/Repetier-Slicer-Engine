@@ -124,37 +124,32 @@ int CLI::run(int argc, char **argv)
                 return 1;
             }
         }
-        DynamicPrintConfig  config;
-        ConfigSubstitutions config_substitutions;
-        try {
-            config_substitutions = config.load(file, config_substitution_rule);
-        } catch (std::exception &ex) {
-            boost::nowide::cerr << "Error while reading config file \"" << file << "\": " << ex.what() << std::endl;
-            return 1;
-        }
-        if (! config_substitutions.empty()) {
-            boost::nowide::cout << "The following configuration values were substituted when loading \" << file << \":\n";
-            for (const ConfigSubstitution &subst : config_substitutions)
-                boost::nowide::cout << "\tkey = \"" << subst.opt_def->opt_key << "\"\t loaded = \"" << subst.old_value << "\tsubstituted = \"" << subst.new_value->serialize() << "\"\n";
-        }
-        config.normalize_fdm();
-        PrinterTechnology other_printer_technology = Slic3r::printer_technology(config);
-        if (printer_technology == ptUnknown) {
-            printer_technology = other_printer_technology;
-        } else if (printer_technology != other_printer_technology && other_printer_technology != ptUnknown) {
-            boost::nowide::cerr << "Mixing configurations for FFF and SLA technologies" << std::endl;
-            return 1;
-        }
-        m_print_config.apply(config);
-    }
-
-    // are we starting as gcodeviewer ?
-    for (auto it = m_actions.begin(); it != m_actions.end(); ++it) {
-        if (*it == "gcodeviewer") {
-            start_gui = true;
-            start_as_gcodeviewer = true;
-            m_actions.erase(it);
-            break;
+        std::string ext = boost::filesystem::path(file).extension().string();
+        if(ext == ".json") {
+            RSConfig::loadRSConfig(file, *this);
+        } else {
+            DynamicPrintConfig  config;
+            ConfigSubstitutions config_substitutions;
+            try {
+                config_substitutions = config.load(file, config_substitution_rule);
+            } catch (std::exception &ex) {
+                boost::nowide::cerr << "Error while reading config file \"" << file << "\": " << ex.what() << std::endl;
+                return 1;
+            }
+            if (! config_substitutions.empty()) {
+                boost::nowide::cout << "The following configuration values were substituted when loading \" << file << \":\n";
+                for (const ConfigSubstitution &subst : config_substitutions)
+                    boost::nowide::cout << "\tkey = \"" << subst.opt_def->opt_key << "\"\t loaded = \"" << subst.old_value << "\tsubstituted = \"" << subst.new_value->serialize() << "\"\n";
+            }
+            config.normalize_fdm();
+            PrinterTechnology other_printer_technology = Slic3r::printer_technology(config);
+            if (printer_technology == ptUnknown) {
+                printer_technology = other_printer_technology;
+            } else if (printer_technology != other_printer_technology && other_printer_technology != ptUnknown) {
+                boost::nowide::cerr << "Mixing configurations for FFF and SLA technologies" << std::endl;
+                return 1;
+            }
+            m_print_config.apply(config);
         }
     }
 

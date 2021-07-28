@@ -1,4 +1,18 @@
+# Repetier-Slicer-Engine
 
+## What is it
+
+This is a specialized implementation of the great PrusaSlicer with a few
+changes to better work in combination with our Repetier-Server.
+
+## Changes
+
+- Can read .rmf files, which are optimized models like .obj with possible metadata and multiple volumes.
+- Can read rsconfig.json configuration files that define a bed of objects with slicing settings.
+- Always adds special comments to gcode that allows better parsing of things like shape, feature, layer.
+- Only cli without all the gui and resource file overhead for faster loading.
+
+---
 ![PrusaSlicer logo](/resources/icons/PrusaSlicer.png?raw=true)
 
 # PrusaSlicer

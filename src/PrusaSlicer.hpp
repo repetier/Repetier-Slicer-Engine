@@ -3,6 +3,7 @@
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Model.hpp"
+#include "RSConfig.hpp"
 
 namespace Slic3r {
 
@@ -19,6 +20,7 @@ namespace IO {
 }
 
 class CLI {
+    friend class RSConfig;
 public:
     int run(int argc, char **argv);
 

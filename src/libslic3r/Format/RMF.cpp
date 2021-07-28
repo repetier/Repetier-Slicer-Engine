@@ -173,7 +173,9 @@ bool RMFInStream::connect(std::string filename) {
 }
 
 void RMFInStream::toEndOfBlock() {
-    in.seekg(static_cast<uint32_t>(in.tellg()) + length - pos, std::ios_base::beg);
+    if(length != pos) {
+        in.seekg(/* static_cast<uint32_t>(in.tellg()) + */ length - pos, std::ios_base::cur);
+    }
 }
 
 void RMFInStream::scanBlockType() {
