@@ -168,6 +168,7 @@ if (WIN32)
 #    set_target_properties(Repetier-Slicer-Engine_app PROPERTIES OUTPUT_NAME "Repetier-Slicer-Engine")
 #    target_link_libraries(Repetier-Slicer-Engine_app PRIVATE boost_headeronly)
 
+    set_target_properties(Repetier-Slicer-Engine PROPERTIES OUTPUT_NAME "Repetier-Slicer-Engine_lib")
     add_executable(Repetier-Slicer-Engine_app PrusaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/PrusaSlicer.rc)
     # Generate debug symbols even in release mode.
     if (MSVC)

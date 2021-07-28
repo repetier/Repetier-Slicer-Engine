@@ -282,11 +282,11 @@ int wmain(int argc, wchar_t **argv)
 
     wchar_t path_to_slic3r[MAX_PATH + 1] = { 0 };
     wcscpy(path_to_slic3r, path_to_exe);
-    wcscat(path_to_slic3r, L"Repetier-Slicer-Engine.dll");
+    wcscat(path_to_slic3r, L"Repetier-Slicer-Engine_lib.dll");
 //	printf("Loading Slic3r library: %S\n", path_to_slic3r);
     HINSTANCE hInstance_Slic3r = LoadLibraryExW(path_to_slic3r, nullptr, 0);
     if (hInstance_Slic3r == nullptr) {
-        printf("Repetier-Slicer-Engine.dll was not loaded\n");
+        printf("Repetier-Slicer-Engine_lib.dll was not loaded\n");
         return -1;
     }
 
@@ -300,7 +300,7 @@ int wmain(int argc, wchar_t **argv)
 #endif
         );
     if (slic3r_main == nullptr) {
-        printf("could not locate the function slic3r_main in Repetier-Slicer-Engine.dll\n");
+        printf("could not locate the function slic3r_main in Repetier-Slicer-Engine_lib.dll\n");
         return -1;
     }
     // argc minus the trailing nullptr of the argv
