@@ -2644,9 +2644,11 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
     }
 
 #if ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
-    if (last_was_wipe_tower || m_last_width != path.width) {
+    if (last_was_wipe_tower || m_last_width != path.width || m_last_height != path.height) {
         m_last_width = path.width;
-        sprintf(buf, ";%s%g\n", GCodeProcessor::Width_Tag.c_str(), m_last_width);
+        m_last_height = path.height;
+        // sprintf(buf, ";%s%g\n", GCodeProcessor::Width_Tag.c_str(), m_last_width);
+        sprintf(buf, ";tool W%g H%g\n", m_last_width, m_last_height);
         gcode += buf;
     }
 #endif // ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE

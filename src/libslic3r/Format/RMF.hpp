@@ -1,6 +1,8 @@
 #ifndef slic3r_Format_rmf_hpp_
 #define slic3r_Format_rmf_hpp_
 
+#include <fstream>
+
 namespace Slic3r {
 
 /* The format for saving the SLA points was changing in the past. This enum holds the latest version that is being currently used.
@@ -21,6 +23,63 @@ struct ConfigSubstitutionContext;
 class DynamicPrintConfig;
 struct ThumbnailData;
 
+class RMFVolume {
+    void swap(RMFVolume& rhs) noexcept;
+public:
+    int start, end;
+    std::string name;
+    std::map<std::string, std::string> *config;
+
+    RMFVolume();
+    RMFVolume(RMFVolume const& other);
+    RMFVolume(RMFVolume&& that) noexcept;
+    ~RMFVolume();
+    RMFVolume &operator=(RMFVolume const& other);
+    RMFVolume& operator=(RMFVolume&& that) noexcept;
+};
+
+class RMFInstance {
+public:
+    std::string transform;
+};
+
+class RMFRange {
+    void swap(RMFRange& rhs) noexcept;
+public:
+    double z_min, z_max;
+    int objectId;
+    std::map<std::string, std::string> *config;
+
+    RMFRange();
+    RMFRange(RMFRange const& other);
+    RMFRange(RMFRange&& that) noexcept;
+    ~RMFRange();
+    RMFRange &operator=(RMFRange const& other);
+    RMFRange& operator=(RMFRange&& that) noexcept;
+};
+
+class RMFPartData {
+    void swap(RMFPartData& rhs) noexcept;
+public:
+    ModelVolumeType volume_type;
+    std::string layer_heights;
+    std::string transform;
+    std::string name;
+    std::map<std::string,std::string> *config;
+    std::map<int, std::string> *seam;
+    std::map<int, std::string> *support;
+    std::vector<RMFRange> *ranges;
+    std::vector<RMFInstance> instances;
+    std::vector<RMFVolume> *volumes;
+    static std::vector<RMFPartData> parts;
+    
+    RMFPartData();
+    RMFPartData(RMFPartData const& other);
+    RMFPartData(RMFPartData&& that) noexcept;
+    ~RMFPartData();
+    RMFPartData &operator=(RMFPartData const& other);
+    RMFPartData& operator=(RMFPartData&& that) noexcept;
+};
 
 class RMFInStream {
 public:
